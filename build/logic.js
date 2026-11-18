@@ -1,4 +1,4 @@
-// ---- fish-pet v2 逻辑（拼接在 head.js 资产之后）----
+// ---- fish-pet GUI 逻辑 ----
 // 移植自 dsh-pet：动画链/物理/掷骰保留 v1；新增多开互撞、双击弹弓、点击池+音效、
 // 持久化(声明式 store)、待办、天气、余额六档、鱼会话(碎碎念/对话/梦话)、Panel、Contract、通知开关。
 // 通道事实（均已核对源码）：session.prompt/create 走 data 解包；message.list {data,cursor} 带 order:desc；
@@ -722,7 +722,7 @@ module.exports.default = Plugin.define((() => {
       }
 
       // ---------- 会话鱼粘性绑定：鱼0 永远聚合；鱼1..N 绑运行中会话，绝不轮换 ----------
-      // 规则（Opus+Kimi 综合裁定）：空闲鱼挑最活跃的无主会话；释放 = max(绑定起+30s, 完成+8s)；
+      // 规则：空闲鱼挑最活跃的无主会话；释放 = max(绑定起+30s, 完成+8s)；
       // 换绑先播 1s waiting 交接；绑定鱼档位切换带 4s 本地驻留；溢出会话归聚合鱼。
       const binds = new Map();
       function syncBindings(list) {

@@ -22,7 +22,7 @@ sound = base64.b64encode(open(os.path.join(SRC, "click-duck.wav"), "rb").read())
 
 with open(OUT, "w") as f:
     f.write('"use strict";\n')
-    f.write("// fish-pet —— 窗口内大肥鱼桌宠（port 自 dsh-pet；素材 CC-BY-NC 个人使用，公开分发须换自产素材）\n")
+    f.write("// fish-pet —— 窗口内大肥鱼桌宠（port 自 dsh-pet；素材源自 dsh-pet，禁止商用；公开分发须署名 https://github.com/PC2005-cloud/dsh-pet，详见 LICENSE）\n")
     f.write("// 形态：GUI-only 渲染器插件（Style + Slot window.bottom + 裸 DOM 兜底），无 main 导出、不声明 os\n")
     f.write("// 资产：27 段 480x270 VP9-alpha WebM 重编码（libvpx 解码保 alpha，CRF 42）\n\n")
     f.write("const ASSETS = {\n" + ",\n".join(parts) + "\n};\n\n")

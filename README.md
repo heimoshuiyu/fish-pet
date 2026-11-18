@@ -3,44 +3,54 @@
 OpenCode V2 桌面宠物插件：一条跟随会话状态的大肥鱼（吃白饭、碎碎念、看你干活、庆祝/沮丧），
 窗口内渲染，移植自 DSH 的 dsh-pet（大肥鱼）。双半架构：server 是脑，窗口只做展示。
 
-## 文件
+## 安装
+
+```bash
+opencode plugin add opencode-fish-pet
+```
+
+或 opencode.json：
+
+```jsonc
+"plugins": [
+  "opencode-fish-pet",
+  // 可选：余额六档（BYO key，每 30 分钟自查一次）
+  { "package": "opencode-fish-pet", "options": { "balance": {
+      "deepseek": { "apiKey": "sk-…", "total": 50 },
+      "custom": [ { "name": "中转站", "url": "https://…/balance", "headers": { "Authorization": "Bearer …" }, "path": "data.remaining", "total": 100 } ]
+  } } }
+]
+```
+
+注意：
+- 需要 OpenCode ≥ 2.0；GUI 插件通道为 experimental，宿主大版本升级后可能要求更新本插件
+- 桌面/Web 窗口可见；TUI 端无鱼（GUI 插件不进终端，属预期）
+- 鱼的碎碎念/对话会创建一个普通 OpenCode 会话（标题 🐟 fish-pet 对话），走你自己配置的模型计费
+- 右键鱼有菜单：睡觉/起来、再来一只、收起这只、换个动作、开聊、记一笔待办、查天气、查余额、
+  碎碎念一句、重置鱼脑、开关完成通知、大一点/小一点、回原位（共 14 项）；
+  桌面端 `Settings → Extensions → Plugins` 可关
+
+## 行为速览
+
+- 工作状态机：聚合所有运行中会话（thinking/working/result），250ms 采样、1.2s 稳定、4s 驻留
+- 完成庆祝：前台会话收官全量庆祝，后台完成冒气泡不抢动画；子代理完成静默
+- 碎碎念：每 5 分钟随口一句（10 分钟内无观众心跳则沉默）；睡觉时说梦话
+- 多开：可养多条鱼，鱼 0 演聚合状态，其余各绑一个运行中会话
+- 面板聊天：Fish 标签页可直接对话，发送即有"正在琢磨"反馈、逐字流式回复
+
+## 包结构
 
 | 文件 | 角色 |
 |---|---|
-| `index.ts` | server 脑：会话事件 → 工作状态机（250ms 采样 / 1.2s 稳定 / 4s 驻留）、碎碎念（单点 + 10min 观众门控）、完成庆祝与后台气泡、待办、天气、鱼会话（普通 OpenCode session，随当前会话模型创建） |
-| `rpc.ts` | server ↔ 窗口的 JSON-Schema 契约（`state`/`focus`/`whisper`/`say`/`todo*`/`weather`/`resetBrain` + `state` 事件） |
-| `gui-experimental.cjs` | 前端渲染器 bundle（CJS，7.4MB 含内嵌资产）。窗口跑 default export；`main` 导出不存在=不做桌面悬浮，属预期 |
-| `package.json` | `{"private": true}` 是防误发 npm 的保险栓，发布时再改形状 |
+| `index.ts` | server 脑（入口 `.`） |
+| `rpc.ts` | server ↔ 窗口的 JSON-Schema 契约（入口 `./rpc`，`state`/`focus`/`whisper`/`say`/`todo*`/`weather`/`resetBrain`） |
+| `gui-experimental.cjs` | 前端渲染器 bundle（入口 `./gui-experimental`，CJS，7.4MB 含内嵌资产）；窗口跑 default export，`main` 导出不存在=不做桌面悬浮，属预期 |
 
-## build/ —— GUI 源码与资产管线
+源码、资产管线与开发循环见仓库：<https://github.com/heimoshuiyu/fish-pet>（`DEVELOPMENT.md`）。
 
-- `logic.js`：GUI 逻辑源（改这里，不要改 cjs）
-- `gen-assets.py` + `assets/`：27 段 480×270 VP9-alpha webm + 鸭子音效 → base64 常量 `head.js`（脚本目录自包含）
-- `build.sh`：拼接 head.js + logic.js → 写入插件目录，`node --check` 校验；桌面端经 `plugin.updated` 热重载
-- `surgery-v4.py` / `tail-extract.cjs`：v4 迁移期的一次性工具，留档
+## 致谢与素材条款
 
-## 开发循环
-
-本仓库是源，live 部署目标是 `~/.config/opencode/plugins/fish-pet/`（auto-discovery）：
-
-```bash
-# server 侧改动：改 index.ts / rpc.ts 后同步过去，server 热重载
-cp index.ts rpc.ts ~/.config/opencode/plugins/fish-pet/
-
-# GUI 侧改动：改 build/logic.js 后构建（build.sh 自动写入部署目标并热重载）
-bash build/build.sh
-```
-
-## ⚠️ 素材许可
-
-27 段动画与音效源自 dsh-pet（CC-BY-NC）。**个人使用 OK；公开分发前必须**：
-换自产素材（`gen-assets.py` 管线可复用），或整包按 CC-BY-NC-4.0 发布并署名 dsh-pet 原作者。
-本仓库因此建为 private；转 public / 发 npm 前先做这个决定。
-
-## 发布（尚未执行，已调研）
-
-标准路径：npm 包（exports `.` + `./rpc` + `./gui-experimental`，`files` 带上三者）→
-用户 `opencode plugin add fish-pet` 一行装完；或 Git 私发
-`opencode plugin add 'git+https://github.com/heimoshuiyu/fish-pet.git'`（figma 同款模式，绕开资产许可问题）。
-版本声明建议 `peerDependencies: { "@opencode/plugin": ">=2.0.0 <3" }`；README 需注明
-GUI 通道为 experimental、TUI 端无鱼、鱼会话走用户自己的模型计费。
+- 社区作品，与 OpenCode / DeepSeek Harness 无关联
+- 动画链/物理等部分代码与 27 段动画、音效源自 dsh-pet（PC2005-cloud）：代码 MIT（LICENSE 内已保留其版权行）；
+  **素材禁止商用**，公开渠道分发须署名 https://github.com/PC2005-cloud/dsh-pet
+  —— 本包据此标注 `SEE LICENSE IN LICENSE`（代码 MIT + 素材条款，详见 LICENSE）
