@@ -1139,7 +1139,7 @@ module.exports.default = Plugin.define((() => {
       // =========================================================
       // 对话面板（Panel）：鱼会话的一个视图
       // =========================================================
-      const chatTab = { id: "chat", title: "Fish", pinned: true };
+      const chatTab = { id: "chat", title: "Fish", pinned: true, fallback: true }; // 空选回退：无存储标签时宿主自动选中鱼聊天，避免侧栏停在 "Select a file to open" 死占位符
       const chatViews = new Set();
 
       // ---------- 鱼自己"正在回复"的可见状态 ----------
