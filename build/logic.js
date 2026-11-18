@@ -1241,7 +1241,7 @@ module.exports.default = Plugin.define((() => {
                 if (m.type === "assistant" && m.finish === "error") {
                   row.textContent = "⚠️ " + (m.error?.message ?? T().panel.genFailed);
                 } else {
-                  row.textContent = textOf(m).slice(0, 500) || "…";
+                  row.textContent = textOf(m) || "…";
                 }
                 return row;
               }),
@@ -1261,7 +1261,7 @@ module.exports.default = Plugin.define((() => {
             liveRow = document.createElement("div");
             liveRow.className = "fish-row fish-row-fish";
           }
-          liveRow.textContent = text.slice(-500) + " ▍";
+          liveRow.textContent = text + " ▍";
           if (!liveRow.isConnected) list.appendChild(liveRow);
           list.scrollTop = list.scrollHeight;
         }, setBusy: (on) => {
