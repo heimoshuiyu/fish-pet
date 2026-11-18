@@ -1032,6 +1032,10 @@ module.exports.default = Plugin.define((() => {
       const reportFocus = () => {
         if (shared.dead || !fishRpc) return;
         const cur = ctx.sessions.current?.();
+        // 防自反馈：路由中的会话就是鱼会话（在会话列表里点开了它）时，摘要读到的会是鱼自己的话，
+        // 绝不能当主人情境回传——报空 digest + 无主会话；碎碎念退化为无情境（提示词本就允许为空）。
+        // fishSid 尚未同步到本窗口的间隙由 server 侧 focus 的 fishSessionID 防御兜底。
+        const onFish = !!(cur?.id && fishSid && cur.id === fishSid);
         const running = [];
         try {
           for (const s of ctx.sessions.list?.() ?? []) {
@@ -1042,7 +1046,7 @@ module.exports.default = Plugin.define((() => {
           /* 数据层缺席 */
         }
         void fishRpc
-          .focus({ sessionID: cur?.id ?? null, digest: buildDigest(), sleeping: sleepingAll(), running, lang: lang(), whisper: prefs.value.whisper !== false })
+          .focus({ sessionID: onFish ? null : (cur?.id ?? null), digest: onFish ? "" : buildDigest(), sleeping: sleepingAll(), running, lang: lang(), whisper: prefs.value.whisper !== false })
           .then(applyState, () => {});
       };
       later(reportFocus, 1500);

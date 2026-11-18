@@ -487,9 +487,12 @@ export default {
     const registration = await context.rpc.register(FishState, {
       state: async () => snapshot(),
       focus: async (input) => {
+        // 防自反馈：前端路由到了鱼会话（fishSid 尚未同步到前端时前端拦不住）——此时摘要就是鱼自己的话，
+        // 不能当主人情境。按 fishSessionID 判定并清空 sessionID/digest；心跳/观众/开关语义照常。
+        const selfFocus = !!input.sessionID && input.sessionID === fishSessionID
         focus = {
-          sessionID: input.sessionID ?? null,
-          digest: String(input.digest ?? "").slice(0, 2000),
+          sessionID: selfFocus ? null : (input.sessionID ?? null),
+          digest: selfFocus ? "" : String(input.digest ?? "").slice(0, 2000),
           sleeping: !!input.sleeping,
           lang: typeof input.lang === "string" ? input.lang : "en",
           whisper: input.whisper !== false,
