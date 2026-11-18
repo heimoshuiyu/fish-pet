@@ -70,6 +70,8 @@ export const FishState = {
           sleeping: { type: "boolean" },
           running: { type: "array", items: { type: "string" } },
           lang: { type: "string" },
+          // 碎碎念总开关（缺省/true=开；false 时 server 定时碎碎念与梦话静默，手动不受影响）
+          whisper: { type: "boolean" },
         },
         required: ["sessionID", "digest", "sleeping", "running"],
         additionalProperties: false,

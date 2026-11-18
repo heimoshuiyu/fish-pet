@@ -178,6 +178,7 @@ const STR = {
       sleep: "睡觉", wake: "起来", addAnother: "再来一只", dismiss: "收起这只", randomMove: "换个动作",
       chat: "开聊", todo: "记一笔待办", balance: "查余额", murmur: "碎碎念一句", nameFish: "起个名字",
       resetBrain: "重置鱼脑", notifyOn: "开完成通知", notifyOff: "关完成通知",
+      whisperOn: "开碎碎念", whisperOff: "关碎碎念",
       bigger: "大一点", smaller: "小一点", home: "回原位", lang: "语言", back: "返回",
     },
     bubbles: {
@@ -185,7 +186,7 @@ const STR = {
       notifyOn: "好，我盯着～", notifyOff: "好，不吵你～",
       sendFailed: "发送失败了…（右键鱼「重置鱼脑」再试）", notReady: "面板还没就绪，稍等一下…",
       replyError: "模型出岔子了…（右键「重置鱼脑」或在会话里换模型）", replyErrorShort: "模型出岔子了…",
-      balanceNoKey: "还没给我配余额钥匙～", langSwitched: "好的，说中文～", nameSet: (n) => `以后就叫「${n}」啦～`, maxFish: "最多六只啦！",
+      balanceNoKey: "还没给我配余额钥匙～", whisperOn: "好，我会偶尔唠叨～", whisperOff: "好，安静待着～", nameSet: (n) => `以后就叫「${n}」啦～`, maxFish: "最多六只啦！",
       todoDone: "记下啦：",
     },
     panel: {
@@ -205,6 +206,7 @@ const STR = {
       sleep: "Sleep", wake: "Wake up", addAnother: "One more fish", dismiss: "Put this one away", randomMove: "Another move",
       chat: "Let's chat", todo: "Add a to-do", balance: "Check balance", murmur: "Say something", nameFish: "Name the fish",
       resetBrain: "Reset brain", notifyOn: "Turn notifications on", notifyOff: "Turn notifications off",
+      whisperOn: "Turn muttering on", whisperOff: "Turn muttering off",
       bigger: "Bigger", smaller: "Smaller", home: "Back to spot", lang: "Language", back: "Back",
     },
     bubbles: {
@@ -212,7 +214,7 @@ const STR = {
       notifyOn: "Okay, I'll keep watch~", notifyOff: "Okay, I'll stay quiet~",
       sendFailed: "Couldn't send… (right-click → Reset brain and retry)", notReady: "Panel not ready yet, one sec…",
       replyError: "Model hiccup… (right-click → Reset brain, or switch model in the session)", replyErrorShort: "Model hiccup…",
-      balanceNoKey: "No balance key configured yet~", langSwitched: "English it is~", nameSet: (n) => `"${n}" it is~`, maxFish: "Six fish max!",
+      balanceNoKey: "No balance key configured yet~", whisperOn: "Okay, I'll chatter now and then~", whisperOff: "Okay, staying quiet~", nameSet: (n) => `"${n}" it is~`, maxFish: "Six fish max!",
       todoDone: "Noted: ",
     },
     panel: {
@@ -232,6 +234,7 @@ const STR = {
       sleep: "寝る", wake: "起きる", addAnother: "もう一匹", dismiss: "この子をしまう", randomMove: "別の動き",
       chat: "おしゃべり", todo: "todoを追加", balance: "残高チェック", murmur: "ひとこと", nameFish: "名前をつける",
       resetBrain: "脳をリセット", notifyOn: "通知をつける", notifyOff: "通知をけす",
+      whisperOn: "ひとことオン", whisperOff: "ひとことオフ",
       bigger: "大きく", smaller: "小さく", home: "元の場所へ", lang: "言語", back: "戻る",
     },
     bubbles: {
@@ -239,7 +242,7 @@ const STR = {
       notifyOn: "うん、見てるよ〜", notifyOff: "うん、静かにするね〜",
       sendFailed: "送信できなかった…（右クリック→脳をリセットしてもう一回）", notReady: "パネルの準備中…ちょっと待ってね…",
       replyError: "モデルがミスしたみたい…（右クリック→脳をリセット、またはセッションでモデル変更）", replyErrorShort: "モデルがミスしたみたい…",
-      balanceNoKey: "残高の鍵がまだ設定されてないよ〜", langSwitched: "日本語ですね〜", nameSet: (n) => `「${n}」だね〜`, maxFish: "最大6匹だよ！",
+      balanceNoKey: "残高の鍵がまだ設定されてないよ〜", whisperOn: "うん、たまに喋るね〜", whisperOff: "うん、静かにしてるね〜", nameSet: (n) => `「${n}」だね〜`, maxFish: "最大6匹だよ！",
       todoDone: "メモした：",
     },
     panel: {
@@ -317,7 +320,7 @@ const playClickSound = () => {
 };
 
 const buildPrefs = () => {
-  const INITIAL = { width: 200, positions: [], todos: [], sessionID: undefined, notify: false, lang: "en" };
+  const INITIAL = { width: 200, positions: [], todos: [], sessionID: undefined, notify: false, whisper: true, lang: "en" };
   if (!Schema || !Store) return { decl: {}, shim: { ...INITIAL, INITIAL } };
   try {
     const Prefs = Schema.Struct({
@@ -326,6 +329,7 @@ const buildPrefs = () => {
       todos: Schema.Array(Schema.Struct({ text: Schema.String })),
       sessionID: Schema.optional(Schema.String),
       notify: Schema.optional(Schema.Boolean),
+      whisper: Schema.optional(Schema.Boolean),
       lang: Schema.optional(Schema.String),
       whisperLease: Schema.optional(Schema.Struct({ holder: Schema.String, until: Schema.Number })),
     });
@@ -815,6 +819,14 @@ module.exports.default = Plugin.define((() => {
             });
             bubbleOn(prefs.value.notify ? T().bubbles.notifyOn : T().bubbles.notifyOff);
           });
+          item(prefs.value.whisper === false ? T().menu.whisperOn : T().menu.whisperOff, () => {
+            const next = prefs.value.whisper === false; // 当前关 → 打开
+            prefs.update((d) => {
+              d.whisper = next;
+            });
+            bubbleOn(next ? T().bubbles.whisperOn : T().bubbles.whisperOff);
+            reportFocus(); // 立即把总闸状态同步给 server
+          });
           item(T().menu.lang, buildLangPage, true);
           item(T().menu.bigger, () => {
             prefs.update((d) => {
@@ -1140,7 +1152,7 @@ module.exports.default = Plugin.define((() => {
           /* 数据层缺席 */
         }
         void fishRpc
-          .focus({ sessionID: cur?.id ?? null, digest: buildDigest(), sleeping: sleepingAll(), running, lang: lang() })
+          .focus({ sessionID: cur?.id ?? null, digest: buildDigest(), sleeping: sleepingAll(), running, lang: lang(), whisper: prefs.value.whisper !== false })
           .then(applyState, () => {});
       };
       later(reportFocus, 1500);

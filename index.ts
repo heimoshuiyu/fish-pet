@@ -449,7 +449,7 @@ export default {
     let whisperCount = 0
     const doneDedup = new Map<string, number>()
     const reportedAt = new Map<string, number>()
-    let focus: { sessionID: string | null; digest: string; sleeping: boolean; lang: string; at: number } | null = null
+    let focus: { sessionID: string | null; digest: string; sleeping: boolean; lang: string; whisper: boolean; at: number } | null = null
     // 语言（独立开关，随 focus 心跳到达）：影响碎碎念/对话提示词、完成气泡后缀、会话标题
     const slang = (): FishLang => (focus && focus.lang in L10N ? (focus.lang as FishLang) : "en")
 
@@ -492,6 +492,7 @@ export default {
           digest: String(input.digest ?? "").slice(0, 2000),
           sleeping: !!input.sleeping,
           lang: typeof input.lang === "string" ? input.lang : "en",
+          whisper: input.whisper !== false,
           at: Date.now(),
         }
         // 对账：前端看得见全部运行中会话；补上插件加载前已开始的，并记最近上报时间供 tick 清鬼
@@ -864,6 +865,7 @@ export default {
       whisperCount++
       const audience = !!focus && Date.now() - focus.at <= T.AUDIENCE_TTL
       if (!audience) return
+      if (focus?.whisper === false) return // 碎碎念总开关：关了就静默（含梦话；菜单手动触发不受影响）
       if (focus?.sleeping && whisperCount % 2 === 1) return // 全睡时隔拍说梦话
       void runWhisper({ dream: !!focus?.sleeping })
     }, T.WHISPER_EVERY)
