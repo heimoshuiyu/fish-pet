@@ -346,6 +346,7 @@ module.exports.default = Plugin.define((() => {
 
         function playClip(name, opts = {}) {
           state.gen++;
+          applyFacing(); // 走路的左向素材可能覆写过镜像；新片段开播前回到朝向基线
           const myGen = state.gen;
           const back = videos[state.front ^ 1];
           back.loop = !!opts.loop;
@@ -433,7 +434,17 @@ module.exports.default = Plugin.define((() => {
             return scheduleRoll();
           }
           state.busy = true;
-          playClip(pick(POOLS.moves), {});
+          // 朝向跟随移动方向；显示方向 = 素材固有方向 XOR 镜像
+          state.facing = dir < 0 ? "left" : "right";
+          applyFacing();
+          const move = pick(POOLS.moves);
+          const clipLeft = !!move && typeof move === "object" && move.left;
+          playClip(typeof move === "string" ? move : move.name, {});
+          if (clipLeft) {
+            const t = dir > 0 ? "scaleX(-1)" : ""; // 左向素材：向右走时镜像翻成向右，向左走时正好原样
+            videoA.style.transform = t;
+            videoB.style.transform = t;
+          }
           const walkGen = state.gen;
           const LEAD = 1.8;
           const TAIL = 2.2;
@@ -672,7 +683,7 @@ module.exports.default = Plugin.define((() => {
           if (fishes.length > 1) item(T().menu.dismiss, () => removeFish(api));
           item(T().menu.randomMove, () => {
             if (state.sleeping) return;
-            const names = [...POOLS.categories.flatMap((c) => c.actions), ...POOLS.clicks, ...POOLS.moves];
+            const names = [...POOLS.categories.flatMap((c) => c.actions), ...POOLS.clicks, ...POOLS.moves.map((m) => (typeof m === "string" ? m : m.name))];
             playClip(pick(names), { onEnded: toIdle });
             scheduleRoll();
           });

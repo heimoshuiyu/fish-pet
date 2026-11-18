@@ -12,7 +12,7 @@ with open(os.path.join(ROOT, "pools.json"), encoding="utf-8") as f:
 
 clips = set()
 clips |= set(pools["names"].values())
-clips |= set(pools["moves"])
+clips |= {m["name"] if isinstance(m, dict) else m for m in pools["moves"]}
 clips |= set(pools["clicks"])
 clips |= set(pools["whisper"])
 clips |= set(pools["work"])

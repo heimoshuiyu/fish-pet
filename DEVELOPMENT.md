@@ -6,7 +6,7 @@
 - `pools.json`：动画池配置（idle/turn/move 权重、五个分类池、点击/工作/余额/睡觉/碎碎念事件池、cue 映射）——加减动画只改这里
 - `gen-assets.py` + `assets/`：按 pools.json 把全部 webm + 鸭子音效 base64 成 head.js（ASSETS + POOLS 常量）；引用缺文件=构建失败
 - `encode-all.sh`：从 dsh-pet 安装包批量重编码全部素材（480×270 VP9-alpha，保 alpha 配方）到 assets/；首次全量入库时用过
-- `build.sh`：拼接 head.js + logic.js → 写入插件目录，`node --check` 校验；桌面端经 `plugin.updated` 热重载
+- `build.sh`：拼接 head.js + logic.js → 写到仓库根 `gui-experimental.cjs`，`node --check` 校验；本机跑 npm 版，生效走发布 + `opencode plugin update`
 - `surgery-v4.py` / `tail-extract.cjs`：v4 迁移期的一次性工具，留档
 
 ## 开发循环
@@ -22,7 +22,7 @@
 # server 侧改动：改 index.ts / rpc.ts / package.json 后同步过去，server 热重载
 cp index.ts rpc.ts package.json ~/.config/opencode/plugins/fish-pet/
 
-# GUI 侧改动：改 build/logic.js 后构建（build.sh 自动写入部署目标并热重载）
+# GUI 侧改动：改 build/logic.js 后构建（产物进仓库根，发布后 update 生效）
 bash build/build.sh
 ```
 

@@ -4,6 +4,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 python3 gen-assets.py
-cat head.js logic.js > ~/.config/opencode/plugins/fish-pet/gui-experimental.cjs
-node --check ~/.config/opencode/plugins/fish-pet/gui-experimental.cjs
-echo "built: $(du -h ~/.config/opencode/plugins/fish-pet/gui-experimental.cjs | cut -f1)"
+cat head.js logic.js > ../gui-experimental.cjs
+node --check ../gui-experimental.cjs
+echo "built: $(du -h ../gui-experimental.cjs | cut -f1)"
