@@ -46,26 +46,95 @@ const CSS = `
 :root[data-motion="reduce"] .fish-row-pending .d{animation:none}
 `;
 
-const STATUS_TEXT = {
-  thinking: "在忙…",
-  working: "干活中…",
-  result: "整理中…",
-  waiting: "等着你…",
-  success: "搞定啦！",
-  error: "呜…出错了",
+// ---------- i18n：独立语言开关（prefs.lang，zh 默认）；加语言=注册进 LANGS + STR/L10N 各加一块 ----------
+const LANGS = ["zh", "en", "ja"];
+const LANG_NAMES = { zh: "中文", en: "English", ja: "日本語" };
+const STR = {
+  zh: {
+    status: { thinking: "在忙…", working: "干活中…", result: "整理中…", waiting: "等着你…", success: "搞定啦！", error: "呜…出错了" },
+    sleepRefusals: ["我在睡觉，别烦我……", "唔……让我再睡一会儿。", "呼……呼……（装作没听见）"],
+    menu: {
+      sleep: "睡觉", wake: "起来", addAnother: "再来一只", dismiss: "收起这只", randomMove: "换个动作",
+      chat: "开聊", todo: "记一笔待办", balance: "查余额", murmur: "碎碎念一句", nameFish: "起个名字",
+      resetBrain: "重置鱼脑", notifyOn: "开完成通知", notifyOff: "关完成通知",
+      bigger: "大一点", smaller: "小一点", home: "回原位", lang: "语言", back: "返回",
+    },
+    bubbles: {
+      chatFallback: "聊天面板在会话侧栏里～", resetDone: "脑清空啦，下次开口重新开始～",
+      notifyOn: "好，我盯着～", notifyOff: "好，不吵你～",
+      sendFailed: "发送失败了…（右键鱼「重置鱼脑」再试）", notReady: "面板还没就绪，稍等一下…",
+      replyError: "模型出岔子了…（右键「重置鱼脑」或在会话里换模型）", replyErrorShort: "模型出岔子了…",
+      balanceNoKey: "还没给我配余额钥匙～", langSwitched: "好的，说中文～", nameSet: (n) => `以后就叫「${n}」啦～`, maxFish: "最多六只啦！",
+      todoDone: "记下啦：",
+    },
+    panel: {
+      placeholder: "跟鱼说点什么…", send: "发送", emptyNever: "还没开过口～右键鱼「开聊」或直接发消息",
+      emptyBlank: "（空空如也）", pending: "🐟 正在琢磨 ", genFailed: "生成失败",
+    },
+    notify: { success: "搞定啦", error: "出错了" },
+    balanceLabels: ["满溢", "叮当", "如常", "皱眉", "告急", "空了"],
+    balanceReport: (n) => `DeepSeek 剩 ${n} 元`, balanceCustom: (name, n) => `${name} 剩 ${n}`,
+    customName: "自定义", withLabel: (r, l) => `${r}（${l}）`,
+    todo: { title: "记一笔待办", placeholder: "要记的事…（可加 @2026-11-20 15:00 / @2h）" },
+  },
+  en: {
+    status: { thinking: "Busy…", working: "Working…", result: "Wrapping up…", waiting: "Waiting…", success: "Done!", error: "Oops…" },
+    sleepRefusals: ["Zzz… don't bug me…", "Mmm… five more minutes…", "Snore… snore… (pretending not to hear)"],
+    menu: {
+      sleep: "Sleep", wake: "Wake up", addAnother: "One more fish", dismiss: "Put this one away", randomMove: "Another move",
+      chat: "Let's chat", todo: "Add a to-do", balance: "Check balance", murmur: "Say something", nameFish: "Name the fish",
+      resetBrain: "Reset brain", notifyOn: "Turn notifications on", notifyOff: "Turn notifications off",
+      bigger: "Bigger", smaller: "Smaller", home: "Back to spot", lang: "Language", back: "Back",
+    },
+    bubbles: {
+      chatFallback: "The chat panel lives in the session sidebar~", resetDone: "Brain wiped — fresh start next time~",
+      notifyOn: "Okay, I'll keep watch~", notifyOff: "Okay, I'll stay quiet~",
+      sendFailed: "Couldn't send… (right-click → Reset brain and retry)", notReady: "Panel not ready yet, one sec…",
+      replyError: "Model hiccup… (right-click → Reset brain, or switch model in the session)", replyErrorShort: "Model hiccup…",
+      balanceNoKey: "No balance key configured yet~", langSwitched: "English it is~", nameSet: (n) => `"${n}" it is~`, maxFish: "Six fish max!",
+      todoDone: "Noted: ",
+    },
+    panel: {
+      placeholder: "Say something to the fish…", send: "Send", emptyNever: "Haven't spoken yet~ right-click the fish → Let's chat, or just type",
+      emptyBlank: "(nothing yet)", pending: "🐟 Thinking ", genFailed: "Generation failed",
+    },
+    notify: { success: "Done!", error: "Oops…" },
+    balanceLabels: ["Full", "Jingling", "Fine", "Frowning", "Low", "Empty"],
+    balanceReport: (n) => `DeepSeek ¥${n} left`, balanceCustom: (name, n) => `${name}: ${n} left`,
+    customName: "custom", withLabel: (r, l) => `${r} (${l})`,
+    todo: { title: "Add a to-do", placeholder: "What to remember… (optional @2026-11-20 15:00 / @2h)" },
+  },
+  ja: {
+    status: { thinking: "考え中…", working: "お仕事中…", result: "まとめ中…", waiting: "待ってるよ…", success: "できた！", error: "うう…エラー" },
+    sleepRefusals: ["睡眠中なの…起こさないで…", "んー…あと5分…", "くー…くー…（聞こえてないふり）"],
+    menu: {
+      sleep: "寝る", wake: "起きる", addAnother: "もう一匹", dismiss: "この子をしまう", randomMove: "別の動き",
+      chat: "おしゃべり", todo: "todoを追加", balance: "残高チェック", murmur: "ひとこと", nameFish: "名前をつける",
+      resetBrain: "脳をリセット", notifyOn: "通知をつける", notifyOff: "通知をけす",
+      bigger: "大きく", smaller: "小さく", home: "元の場所へ", lang: "言語", back: "戻る",
+    },
+    bubbles: {
+      chatFallback: "チャットパネルはセッションのサイドバーにあるよ〜", resetDone: "脳を空にしたよ〜次は最初から〜",
+      notifyOn: "うん、見てるよ〜", notifyOff: "うん、静かにするね〜",
+      sendFailed: "送信できなかった…（右クリック→脳をリセットしてもう一回）", notReady: "パネルの準備中…ちょっと待ってね…",
+      replyError: "モデルがミスしたみたい…（右クリック→脳をリセット、またはセッションでモデル変更）", replyErrorShort: "モデルがミスしたみたい…",
+      balanceNoKey: "残高の鍵がまだ設定されてないよ〜", langSwitched: "日本語ですね〜", nameSet: (n) => `「${n}」だね〜`, maxFish: "最大6匹だよ！",
+      todoDone: "メモした：",
+    },
+    panel: {
+      placeholder: "魚にお話しかけてみて…", send: "送信", emptyNever: "まだお話ししてないよ〜魚を右クリック→おしゃべり、またはそのまま入力してね",
+      emptyBlank: "（まだ何もない）", pending: "🐟 考えちゅう ", genFailed: "生成に失敗",
+    },
+    notify: { success: "できた！", error: "エラー" },
+    balanceLabels: ["満杯", "チャリン", "いつも", "心配", "やばい", "空っぽ"],
+    balanceReport: (n) => `DeepSeek 残り ¥${n}`, balanceCustom: (name, n) => `${name}: 残り ${n}`,
+    customName: "カスタム", withLabel: (r, l) => `${r}（${l}）`,
+    todo: { title: "todoを追加", placeholder: "覚えておくこと…（@2026-11-20 15:00 / @2h 可）" },
+  },
 };
-const FLAVOR = ["flavor-scared", "flavor-code", "flavor-eat"];
-const CLICKS = ["click", "click-happy", "click-shy", "click-tsundere", "click-tickle"];
-const WEIGHTS = { idle: 55, turn: 12, move: 13, flavor: 20 };
-const SLEEP_REFUSALS = ["我在睡觉，别烦我……", "唔……让我再睡一会儿。", "呼……呼……（装作没听见）"];
-const PERSONA = "你是主人桌面上的一只吃白饭的蓝色大肥鱼（Q版小女仆形象），温柔乖巧带点俏皮，爱碎碎念。";
+// 动画池（gen-assets.py 从 pools.json 注入 head.js；加减动画只改配置文件）
+const workClip = (t) => POOLS.work[({ thinking: 0, working: 1, result: 2, waiting: 3, success: 4, error: 5 }[t] ?? 0)];
 const WHISPER_MARK = "[[fish-whisper]]";
-const CUE_MAP = { 写代码: "flavor-code", 吃白饭: "flavor-eat", 被吓一跳: "flavor-scared", 魔方: "walk", 睡觉: "sleep-start" };
-const WMO_TEXT = {
-  0: "晴", 1: "基本晴", 2: "多云", 3: "阴", 45: "雾", 48: "雾凇",
-  51: "毛毛雨", 53: "细雨", 55: "密雨", 61: "小雨", 63: "中雨", 65: "大雨",
-  71: "小雪", 73: "中雪", 75: "大雪", 80: "阵雨", 81: "阵雨", 82: "强阵雨", 95: "雷暴", 96: "雷暴+冰雹", 99: "雷暴+冰雹",
-};
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const pick = (pool) => pool[Math.floor(Math.random() * pool.length)];
@@ -127,7 +196,7 @@ const playClickSound = () => {
 };
 
 const buildPrefs = () => {
-  const INITIAL = { width: 200, positions: [], todos: [], sessionID: undefined, notify: false };
+  const INITIAL = { width: 200, positions: [], todos: [], sessionID: undefined, notify: false, lang: "en" };
   if (!Schema || !Store) return { decl: {}, shim: { ...INITIAL, INITIAL } };
   try {
     const Prefs = Schema.Struct({
@@ -136,6 +205,7 @@ const buildPrefs = () => {
       todos: Schema.Array(Schema.Struct({ text: Schema.String })),
       sessionID: Schema.optional(Schema.String),
       notify: Schema.optional(Schema.Boolean),
+      lang: Schema.optional(Schema.String),
       whisperLease: Schema.optional(Schema.Struct({ holder: Schema.String, until: Schema.Number })),
     });
     return { decl: { prefs: Store.global(Prefs, INITIAL) }, shim: null };
@@ -172,6 +242,10 @@ module.exports.default = Plugin.define((() => {
               ctx.stores.prefs.update(fn);
             },
           };
+
+      // ---------- 语言（独立开关，prefs.lang；切换后经 focus 心跳同步给 server）----------
+      const lang = () => (LANGS.includes(prefs.value.lang) ? prefs.value.lang : "en");
+      const T = () => STR[lang()];
 
       const shared = {
         dead: false,
@@ -292,7 +366,7 @@ module.exports.default = Plugin.define((() => {
           setTimeout(swap, 900);
         }
         const frontVideo = () => videos[state.front];
-        const toIdle = () => playClip("idle", { loop: true });
+        const toIdle = () => playClip(POOLS.names.idle, { loop: true });
 
         const squash = () => {
           inner.style.transform = "scale(1.12,0.88)";
@@ -322,16 +396,27 @@ module.exports.default = Plugin.define((() => {
           if (state.dragging || state.busy) return scheduleRoll(4000); // 交互中：短续
           if (shared.work || shared.flash) return scheduleRoll(15000); // 工作期：慢续，链不能死
           if (document.hidden || reduced()) return scheduleRoll(30000);
+          const W = POOLS.weights;
           const roll = Math.random() * 100;
-          if (roll < WEIGHTS.idle) return scheduleRoll();
-          if (roll < WEIGHTS.idle + WEIGHTS.turn) {
+          if (roll < W.idle) return scheduleRoll();
+          if (roll < W.idle + W.turn) {
             state.facing = state.facing === "right" ? "left" : "right";
             applyFacing();
-            playClip("turn", { onEnded: toIdle });
+            playClip(POOLS.names.turn, { onEnded: toIdle });
             return scheduleRoll();
           }
-          if (roll < WEIGHTS.idle + WEIGHTS.turn + WEIGHTS.move) return walkStep();
-          playClip(pick(FLAVOR), { onEnded: toIdle });
+          if (roll < W.idle + W.turn + W.move) return walkStep();
+          // 分类池按权重抽；带文字的池（noMirror）在被镜像（朝左）时不播
+          const cats = POOLS.categories.filter((c) => !(c.noMirror && state.facing === "left"));
+          const total = cats.reduce((s, c) => s + c.weight, 0);
+          let r = Math.random() * total;
+          for (const c of cats) {
+            r -= c.weight;
+            if (r <= 0) {
+              playClip(pick(c.actions), { onEnded: toIdle });
+              break;
+            }
+          }
           scheduleRoll();
         }
 
@@ -344,7 +429,7 @@ module.exports.default = Plugin.define((() => {
             return scheduleRoll();
           }
           state.busy = true;
-          playClip("walk", {});
+          playClip(pick(POOLS.moves), {});
           const walkGen = state.gen;
           const LEAD = 1.8;
           const TAIL = 2.2;
@@ -462,8 +547,8 @@ module.exports.default = Plugin.define((() => {
           hit.classList.add("fish-drag");
           if (state.sleeping && state.armed) {
             // 弹弓不叫醒，只是拉开
-          } else if (!state.sleeping && state.current !== "drag") {
-            playClip("drag", { loop: true });
+          } else if (!state.sleeping && state.current !== POOLS.names.drag) {
+            playClip(POOLS.names.drag, { loop: true });
           }
           const start = { px: e.clientX, py: e.clientY, x: state.x, y: state.y, t: performance.now() };
           const samples = [];
@@ -494,7 +579,7 @@ module.exports.default = Plugin.define((() => {
               const dist = Math.hypot(pull.dx, pull.dy);
               if (dist < 12) return clickPoke();
               if (reduced()) return land();
-              playClip("click-happy", {});
+              playClip(POOLS.names.clickHappy, {});
               throwFish(-(pull.dx / Math.max(dist, 1)) * clamp(dist * 14, 300, 2400), -(pull.dy / Math.max(dist, 1)) * clamp(dist * 14, 300, 2400), true);
               return;
             }
@@ -531,7 +616,7 @@ module.exports.default = Plugin.define((() => {
           squash();
           playClickSound();
           if (state.sleeping) return;
-          playClip(pick(CLICKS), { onEnded: toIdle });
+          playClip(pick(POOLS.clicks), { onEnded: toIdle });
           scheduleRoll();
         }
 
@@ -539,12 +624,12 @@ module.exports.default = Plugin.define((() => {
         function goSleep() {
           state.sleeping = true;
           hideBubble();
-          playClip("sleep-start", { onEnded: () => playClip("sleep-loop", { loop: true }) });
+          playClip(POOLS.sleep[0], { onEnded: () => playClip(POOLS.sleep[1], { loop: true }) });
         }
         function wake() {
           if (!state.sleeping) return;
           state.sleeping = false;
-          playClip("sleep-end", { onEnded: toIdle });
+          playClip(POOLS.sleep[2], { onEnded: toIdle });
           scheduleRoll();
         }
 
@@ -567,65 +652,91 @@ module.exports.default = Plugin.define((() => {
           closeMenu();
           menu = document.createElement("div");
           menu.className = "fish-menu";
-          const item = (label, fn) => {
+          const item = (label, fn, keep = false) => {
             const b = document.createElement("button");
             b.textContent = label;
             b.addEventListener("click", () => {
-              closeMenu();
+              if (!keep) closeMenu();
               fn();
             });
             menu.appendChild(b);
+            return b;
           };
-          item(state.sleeping ? "起来" : "睡觉", () => (state.sleeping ? wake() : goSleep()));
-          item("再来一只", () => addFish());
-          if (fishes.length > 1) item("收起这只", () => removeFish(api));
-          item("换个动作", () => {
+          const buildMain = () => {
+          item(state.sleeping ? T().menu.wake : T().menu.sleep, () => (state.sleeping ? wake() : goSleep()));
+          item(T().menu.addAnother, () => addFish());
+          if (fishes.length > 1) item(T().menu.dismiss, () => removeFish(api));
+          item(T().menu.randomMove, () => {
             if (state.sleeping) return;
-            const names = Object.keys(ASSETS).filter((n) => !n.startsWith("sleep") && !n.startsWith("balance"));
+            const names = [...POOLS.categories.flatMap((c) => c.actions), ...POOLS.clicks, ...POOLS.moves];
             playClip(pick(names), { onEnded: toIdle });
             scheduleRoll();
           });
-          item("开聊", () => {
+          item(T().menu.chat, () => {
             reportFocus();
             try {
               ctx.layout.open?.(`${ctx.id}:chat`, ctx.sessions.current?.());
             } catch {
-              bubbleOn("聊天面板在会话侧栏里～");
+              bubbleOn(T().bubbles.chatFallback);
             }
           });
-          item("记一笔待办", () => void addTodo());
-          item("查天气", () => void fetchWeather(true));
-          item("查余额", () => void runBalance(true));
-          item("碎碎念一句", () => void whisper({ dream: state.sleeping }));
-          item("重置鱼脑", () => {
+          item(T().menu.todo, () => void addTodo());
+          item(T().menu.balance, () => void runBalance(true));
+          item(T().menu.murmur, () => void whisper({ dream: state.sleeping }));
+          item(T().menu.nameFish, () => void nameFish());
+          item(T().menu.resetBrain, () => {
             void fishRpc?.resetBrain?.({});
-            bubbleOn("脑清空啦，下次开口重新开始～", 3500);
+            bubbleOn(T().bubbles.resetDone, 3500);
           });
-          item(prefs.value.notify ? "关完成通知" : "开完成通知", () => {
+          item(prefs.value.notify ? T().menu.notifyOff : T().menu.notifyOn, () => {
             prefs.update((d) => {
               d.notify = !d.notify;
             });
-            bubbleOn(prefs.value.notify ? "好，我盯着～" : "好，不吵你～");
+            bubbleOn(prefs.value.notify ? T().bubbles.notifyOn : T().bubbles.notifyOff);
           });
-          item("大一点", () => {
+          item(T().menu.lang, buildLangPage, true);
+          item(T().menu.bigger, () => {
             prefs.update((d) => {
               d.width = clamp(d.width + 20, 120, 360);
             });
             for (const w of fishes) w.f.setSize(prefs.value.width);
           });
-          item("小一点", () => {
+          item(T().menu.smaller, () => {
             prefs.update((d) => {
               d.width = clamp(d.width - 20, 120, 360);
             });
             for (const w of fishes) w.f.setSize(prefs.value.width);
           });
-          item("回原位", () => {
+          item(T().menu.home, () => {
             setPos(window.innerWidth - stageW() - 24, 84);
             if (!state.sleeping && !shared.work && !shared.flash) toIdle();
           });
-          menu.style.left = clamp(e.clientX, 8, window.innerWidth - 150) + "px";
-          menu.style.top = clamp(e.clientY, 8, window.innerHeight - 380) + "px";
+          };
+          // 语言选择页：直接点选目标语言（当前项打勾），不再循环
+          const buildLangPage = () => {
+            menu.replaceChildren();
+            item("← " + T().menu.back, buildMain, true);
+            for (const code of LANGS) {
+              item((code === lang() ? "✓ " : "") + LANG_NAMES[code], () => {
+                prefs.update((d) => {
+                  d.lang = code;
+                });
+                bubbleOn(STR[code].bubbles.langSwitched);
+                reportFocus(); // 立即把语言同步给 server（碎碎念/气泡用语）
+              });
+            }
+            placeMenu();
+          };
+          // 先挂载量出实际尺寸再定位：菜单项数随页面/语言变化，翻页后也要按新尺寸重夹
+          const placeMenu = () => {
+            const mw = menu.offsetWidth;
+            const mh = menu.offsetHeight;
+            menu.style.left = clamp(e.clientX, 8, Math.max(8, window.innerWidth - mw - 8)) + "px";
+            menu.style.top = clamp(e.clientY, 8, Math.max(8, window.innerHeight - mh - 8)) + "px";
+          };
+          buildMain();
           document.body.appendChild(menu);
+          placeMenu();
           document.addEventListener("pointerdown", onMenuAway, true);
           document.addEventListener("keydown", onMenuKey, true);
         });
@@ -637,6 +748,16 @@ module.exports.default = Plugin.define((() => {
         };
         document.addEventListener("visibilitychange", onVisible);
 
+        // 窗口缩放：把鱼夹回可视区（位置是视口坐标，缩小窗口会把鱼留在画外）
+        const onResize = () => {
+          if (state.dragging) return; // 拖拽中不抢：落点自会归位
+          setPos(
+            clamp(state.x, 0, Math.max(0, window.innerWidth - stageW())),
+            clamp(state.y, 0, Math.max(0, window.innerHeight - stageH())),
+          );
+        };
+        window.addEventListener("resize", onResize);
+
         const dispose = () => {
           state.gen++;
           clearTimeout(state.rollTimer);
@@ -644,6 +765,7 @@ module.exports.default = Plugin.define((() => {
           cancelAnimationFrame(state.raf);
           closeMenu();
           document.removeEventListener("visibilitychange", onVisible);
+          window.removeEventListener("resize", onResize);
           for (const v of videos) {
             v.pause();
             v.removeAttribute("src");
@@ -665,13 +787,13 @@ module.exports.default = Plugin.define((() => {
         // state.stageW 供互撞读取
         state.stageW = stageW;
         applyFacing();
-        playClip("idle", { loop: true });
+        playClip(POOLS.names.idle, { loop: true });
         scheduleRoll(4000 + Math.random() * 6000);
         return { f: api };
       }
 
       const addFish = (saved) => {
-        if (fishes.length >= 6) return bubbleOn("最多六只啦！");
+        if (fishes.length >= 6) return bubbleOn(T().bubbles.maxFish);
         const fish = createFish(fishes.length, saved ?? null);
         fishes.push(fish);
         return fish;
@@ -711,9 +833,7 @@ module.exports.default = Plugin.define((() => {
       let fishSid = null;
       let lastTier = undefined;
       let lastFlash = undefined;
-      let lastWeather = undefined;
       let lastNoticeAt = 0;
-      let stateTodos = [];
       let fishRpc = null;
       try {
         fishRpc = ctx.client.rpc ? ctx.client.rpc(FishStateDef) : null;
@@ -737,7 +857,7 @@ module.exports.default = Plugin.define((() => {
               const f = fishes[idx]?.f;
               if (f && !f.state.sleeping && !f.state.dragging && !f.state.busy) {
                 f.hideBubble();
-                f.play("idle", { loop: true });
+                f.play(POOLS.names.idle, { loop: true });
               }
             }
           }
@@ -760,7 +880,7 @@ module.exports.default = Plugin.define((() => {
             if (b.tier !== null && now - b.tierAt < 4000) continue;
             b.tier = tier;
             b.tierAt = now;
-            if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play("work-" + tier, { loop: true });
+            if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play(workClip(tier), { loop: true });
           }
         }
       }
@@ -770,14 +890,14 @@ module.exports.default = Plugin.define((() => {
         for (const w of unboundFishes()) {
           const f = w.f;
           if (f.state.sleeping || f.state.dragging || f.state.busy) continue;
-          f.play("work-" + tier, { loop: true });
+          f.play(workClip(tier), { loop: true });
         }
       };
       const petLifeAll = () => {
         for (const w of unboundFishes()) {
           const f = w.f;
           f.hideBubble();
-          if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play("idle", { loop: true });
+          if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play(POOLS.names.idle, { loop: true });
         }
       };
       const notifyFlash = (kind, flashSid, flashAt) => {
@@ -798,7 +918,7 @@ module.exports.default = Plugin.define((() => {
         const stamp = flashAt || Math.floor(Date.now() / 10000); // 旧 server 无 flashAt 时按 10s 分桶
         try {
           void ctx.attention?.notify?.({
-            title: kind === "success" ? "搞定啦" : "出错了",
+            title: kind === "success" ? T().notify.success : T().notify.error,
             message: target.server?.data?.session?.get?.(target.id)?.title ?? "fish-pet",
             variant: kind === "success" ? "default" : "error",
             session: { server: target.server.id, id: target.id },
@@ -813,7 +933,7 @@ module.exports.default = Plugin.define((() => {
         const prevSid = fishSid;
         fishSid = s.sessionID ?? null; // 重置鱼脑后 server 会发 null：必须跟着清空
         if (prevSid && !fishSid) setFishBusy(false); // 重置即收口：不等完成事件（sid 已失配）
-        if (Array.isArray(s.todos)) stateTodos = s.todos;
+        if (typeof s.name === "string" && s.name) chatTab.title = s.name.slice(0, 16);
         if (Array.isArray(s.sessions)) syncBindings(s.sessions);
         if (s.notice && s.notice.at > lastNoticeAt) {
           lastNoticeAt = s.notice.at;
@@ -822,7 +942,7 @@ module.exports.default = Plugin.define((() => {
           const entry = [...binds.entries()].find(([, b]) => b.sid === s.notice.sid);
           const fish = entry ? fishes[entry[0]]?.f : undefined;
           if (fish && !fish.state.sleeping && !fish.state.dragging && !fish.state.busy) {
-            fish.play("work-" + (s.notice.ok ? "success" : "error"), {});
+            fish.play(workClip(s.notice.ok ? "success" : "error"), {});
           }
         }
         if (s.tier !== lastTier) {
@@ -830,7 +950,7 @@ module.exports.default = Plugin.define((() => {
           shared.work = s.tier;
           if (s.tier) {
             playTierAll(s.tier);
-            bubbleOn(STATUS_TEXT[s.tier]);
+            bubbleOn(s.tier === "working" && s.tool ? `${T().status[s.tier]} · ${s.tool}` : T().status[s.tier]);
           } else {
             petLifeAll();
           }
@@ -842,15 +962,11 @@ module.exports.default = Plugin.define((() => {
             for (const w of unboundFishes()) {
               const f = w.f;
               if (f.state.sleeping || f.state.dragging) continue;
-              f.play("work-" + s.flash, {});
+              f.play(workClip(s.flash), {});
             }
-            bubbleOn(STATUS_TEXT[s.flash], 3000);
+            bubbleOn(T().status[s.flash], 3000);
             notifyFlash(s.flash, s.flashSid, s.flashAt);
           }
-        }
-        if (s.weather !== undefined && s.weather !== lastWeather) {
-          lastWeather = s.weather;
-          if (s.weather) bubbleOn("📍" + s.weather, 5000);
         }
       }
       if (fishRpc) {
@@ -903,7 +1019,7 @@ module.exports.default = Plugin.define((() => {
           /* 数据层缺席 */
         }
         void fishRpc
-          .focus({ sessionID: cur?.id ?? null, digest: buildDigest(), sleeping: sleepingAll(), running })
+          .focus({ sessionID: cur?.id ?? null, digest: buildDigest(), sleeping: sleepingAll(), running, lang: lang() })
           .then(applyState, () => {});
       };
       later(reportFocus, 1500);
@@ -919,7 +1035,7 @@ module.exports.default = Plugin.define((() => {
           const msg = (res.data ?? []).find((m) => m.type === "assistant");
           if (!msg) return;
           if (msg.finish === "error") {
-            bubbleOn("模型出岔子了…（右键「重置鱼脑」或在会话里换模型）", 5000);
+            bubbleOn(T().bubbles.replyError, 5000);
             for (const view of chatViews) view.refresh?.();
             return;
           }
@@ -930,8 +1046,8 @@ module.exports.default = Plugin.define((() => {
           const f = leadFish();
           if (f) {
             f.bubble(clean.slice(0, 60) || "……", 6000);
-            const clip = cue && CUE_MAP[cue[1].trim()];
-            if (clip && ASSETS[clip] && !f.state.sleeping) f.play(clip, { onEnded: () => f.play("idle", { loop: true }) });
+            const clip = (cue && POOLS.cueMap[cue[1].trim()]) || pick(POOLS.whisper); // 无 cue 也要演一段碎碎念动画
+            if (clip && ASSETS[clip] && !f.state.sleeping) f.play(clip, { onEnded: () => f.play(POOLS.names.idle, { loop: true }) });
           }
           for (const view of chatViews) view.refresh?.();
         } catch {
@@ -984,7 +1100,7 @@ module.exports.default = Plugin.define((() => {
             streamCtl?.abort();
             setFishBusy(false);
             if (ev.type === "session.execution.succeeded") void fishReply();
-            else if (ev.type === "session.execution.failed") bubbleOn("模型出岔子了…", 4000);
+            else if (ev.type === "session.execution.failed") bubbleOn(T().bubbles.replyErrorShort, 4000);
             // interrupted：主人自己掐断的，静默收口
             for (const view of chatViews) view.refresh?.();
           }
@@ -1019,7 +1135,7 @@ module.exports.default = Plugin.define((() => {
         if (on) {
           const f = leadFish();
           if (f && !f.state.sleeping && !f.state.dragging && !f.state.busy && !shared.work && !shared.flash) {
-            f.play("work-thinking", { loop: true });
+            f.play(workClip("thinking"), { loop: true });
             fishClipOwned = true;
             busyFish = f;
           }
@@ -1029,7 +1145,7 @@ module.exports.default = Plugin.define((() => {
           const g = busyFish;
           busyFish = null;
           if (g && !g.state.sleeping && !g.state.dragging && !g.state.busy && !shared.work && !shared.flash) {
-            g.play("idle", { loop: true });
+            g.play(POOLS.names.idle, { loop: true });
           }
         }
       };
@@ -1042,9 +1158,9 @@ module.exports.default = Plugin.define((() => {
         const composer = document.createElement("div");
         composer.className = "fish-chat-composer";
         const input = document.createElement("input");
-        input.placeholder = "跟鱼说点什么…";
+        input.placeholder = T().panel.placeholder;
         const send = document.createElement("button");
-        send.textContent = "发送";
+        send.textContent = T().panel.send;
         composer.append(input, send);
         wrap.append(list, composer);
 
@@ -1052,7 +1168,7 @@ module.exports.default = Plugin.define((() => {
         const mkPendingRow = () => {
           const row = document.createElement("div");
           row.className = "fish-row fish-row-pending";
-          row.append("🐟 正在琢磨 ");
+          row.append(T().panel.pending);
           for (let i = 0; i < 3; i++) {
             const d = document.createElement("span");
             d.className = "d";
@@ -1083,7 +1199,7 @@ module.exports.default = Plugin.define((() => {
               list.replaceChildren(pendingRow);
               return;
             }
-            list.replaceChildren(Object.assign(document.createElement("div"), { className: "fish-chat-empty", textContent: "还没开过口～右键鱼「开聊」或直接发消息" }));
+            list.replaceChildren(Object.assign(document.createElement("div"), { className: "fish-chat-empty", textContent: T().panel.emptyNever }));
             return;
           }
           try {
@@ -1096,14 +1212,14 @@ module.exports.default = Plugin.define((() => {
                 const row = document.createElement("div");
                 row.className = "fish-row " + (m.type === "assistant" ? "fish-row-fish" : "fish-row-user");
                 if (m.type === "assistant" && m.finish === "error") {
-                  row.textContent = "⚠️ " + (m.error?.message ?? "生成失败");
+                  row.textContent = "⚠️ " + (m.error?.message ?? T().panel.genFailed);
                 } else {
                   row.textContent = textOf(m).slice(0, 500) || "…";
                 }
                 return row;
               }),
             );
-            if (!msgs.length && !fishBusy) list.replaceChildren(Object.assign(document.createElement("div"), { className: "fish-chat-empty", textContent: "（空空如也）" }));
+            if (!msgs.length && !fishBusy) list.replaceChildren(Object.assign(document.createElement("div"), { className: "fish-chat-empty", textContent: T().panel.emptyBlank }));
             liveRow = null;
             if (fishBusy) ensurePendingRow();
             else dropPendingRow();
@@ -1122,7 +1238,7 @@ module.exports.default = Plugin.define((() => {
           if (!liveRow.isConnected) list.appendChild(liveRow);
           list.scrollTop = list.scrollHeight;
         }, setBusy: (on) => {
-          send.textContent = on ? "…" : "发送";
+          send.textContent = on ? "…" : T().panel.send;
           if (on) ensurePendingRow();
           else dropPendingRow();
         } };
@@ -1142,7 +1258,7 @@ module.exports.default = Plugin.define((() => {
           const text = input.value.trim();
           if (!text) return;
           if (!fishRpc) {
-            bubbleOn("面板还没就绪，稍等一下…", 3000);
+            bubbleOn(T().bubbles.notReady, 3000);
             return;
           }
           input.value = "";
@@ -1156,7 +1272,7 @@ module.exports.default = Plugin.define((() => {
           } catch {
             input.value = text; // 找回没发出去的话
             setFishBusy(false);
-            bubbleOn("发送失败了…（右键鱼「重置鱼脑」再试）", 4000);
+            bubbleOn(T().bubbles.sendFailed, 4000);
           }
         };
         send.addEventListener("click", () => void submit());
@@ -1180,31 +1296,31 @@ module.exports.default = Plugin.define((() => {
       }
 
       // =========================================================
-      // 待办：存 server（跟着 state 走），前端只负责录入与提醒气泡
+      // 待办 / 起名：server 存储与节奏，前端只负责录入
       // =========================================================
-      async function addTodo() {
+      async function nameFish() {
         try {
-          const text = await ctx.dialogs.prompt({ title: "记一笔待办", placeholder: "要记的事…" });
-          if (text && text.trim()) {
-            void fishRpc?.todoAdd?.({ text: text.trim() });
-            bubbleOn("记下啦：" + text.trim().slice(0, 30), 3000);
+          const n = await ctx.dialogs.prompt({ title: T().menu.nameFish, placeholder: lang() === "zh" ? "叫它什么…" : lang() === "ja" ? "なんて呼ぶ？" : "What should we call it?" });
+          if (n && n.trim()) {
+            const s = await fishRpc?.name?.({ name: n.trim() });
+            if (s) applyState(s);
+            bubbleOn(STR[lang()].bubbles.nameSet(n.trim().slice(0, 24)));
           }
         } catch {
           /* dialogs 缺席 */
         }
       }
-      every(() => {
-        if (shared.dead || !stateTodos.length) return;
-        leadFish()?.bubble("别忘了：" + pick(stateTodos).slice(0, 30), 4000);
-      }, 10 * 60 * 1000);
-
-      // =========================================================
-      // 天气：server 侧查（免 key、无 CSP 顾虑），文案经 state 推送
-      // =========================================================
-      function fetchWeather() {
-        void fishRpc?.weather?.({}).catch(() => bubbleOn("天气查不到啦…", 3000));
+      async function addTodo() {
+        try {
+          const text = await ctx.dialogs.prompt({ title: T().todo.title, placeholder: T().todo.placeholder });
+          if (text && text.trim()) {
+            void fishRpc?.todoAdd?.({ text: text.trim() });
+            bubbleOn(T().bubbles.todoDone + text.trim().slice(0, 30), 3000);
+          }
+        } catch {
+          /* dialogs 缺席 */
+        }
       }
-
       // =========================================================
       // 余额六档（options.balance BYO key：deepseek / custom 列表）
       // =========================================================
@@ -1226,7 +1342,7 @@ module.exports.default = Plugin.define((() => {
               const total = conf.deepseek.total ?? 50;
               const pct = clamp(100 * (1 - remaining / total), 0, 100);
               worst = Math.max(worst, pct);
-              report = `DeepSeek 剩 ${remaining.toFixed(2)} 元`;
+              report = T().balanceReport(remaining.toFixed(2));
             }
           }
           const customs = Array.isArray(conf.custom) ? conf.custom : [];
@@ -1239,19 +1355,19 @@ module.exports.default = Plugin.define((() => {
               const total = c.total ?? 100;
               const pct = clamp(100 * (1 - remaining / total), 0, 100);
               worst = Math.max(worst, pct);
-              report = report ? report : `${c.name ?? "自定义"} 剩 ${remaining}`;
+              report = report ? report : T().balanceCustom(c.name ?? T().customName, remaining);
             }
           }
         } catch {
           /* 查询失败按无数据处理 */
         }
-        if (worst < 0) return bubbleOn("还没给我配余额钥匙～", 3500);
+        if (worst < 0) return bubbleOn(T().bubbles.balanceNoKey, 3500);
         const idx = worst >= 100 ? 5 : Math.floor(worst / 20);
-        const label = ["满溢", "叮当", "如常", "皱眉", "告急", "空了"][idx];
+        const label = T().balanceLabels[idx];
         for (const f of fishes) {
-          if (!f.f.state.sleeping) f.f.play("balance-" + idx, { onEnded: () => f.f.play("idle", { loop: true }) });
+          if (!f.f.state.sleeping) f.f.play(POOLS.balance[idx], { onEnded: () => f.f.play(POOLS.names.idle, { loop: true }) });
         }
-        bubbleOn(`${report}（${label}）`, 5000);
+        bubbleOn(T().withLabel(report, label), 5000);
       }
       every(() => {
         if (!shared.dead && (ctx.options && ctx.options.balance)) void runBalance(false);
@@ -1267,14 +1383,14 @@ module.exports.default = Plugin.define((() => {
             say: (text) => {
               const f = leadFish();
               if (!f) return;
-              if (f.state.sleeping) return f.bubble(pick(SLEEP_REFUSALS), 3000);
+              if (f.state.sleeping) return f.bubble(pick(T().sleepRefusals), 3000);
               f.bubble(String(text).slice(0, 60), 5000);
             },
             play: (name) => {
               if (!ASSETS[name]) return false;
               const f = leadFish();
               if (!f || f.state.sleeping) return false;
-              f.play(name, { onEnded: () => f.play("idle", { loop: true }) });
+              f.play(name, { onEnded: () => f.play(POOLS.names.idle, { loop: true }) });
               return true;
             },
             status: () => ({

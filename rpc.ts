@@ -16,8 +16,10 @@ const state = {
     // 该次庆祝的发起时刻：通知去重 id 的唯一维度（app 端 claim 持久化 id，静态 id 会永久哑火）
     flashAt: { anyOf: [{ type: "number" }, { type: "null" }] },
     sessionID: { type: ["string", "null"] },
-    todos: { type: "array", items: { type: "string" } },
-    weather: { type: ["string", "null"] },
+    // 宠物名字（server 存储，注入提示词）
+    name: { type: ["string", "null"] },
+    // 最近 90s 工具调用折叠成的一句话（工作气泡展示）
+    tool: { type: ["string", "null"] },
     // 后台完成的气泡（server 组稿、队列合并），at 单调递增供前端判新
     notice: {
       anyOf: [
@@ -49,7 +51,7 @@ const state = {
       },
     },
   },
-  required: ["tier", "flash", "flashSid", "flashAt", "sessionID", "todos", "weather", "notice", "sessions"],
+  required: ["tier", "flash", "flashSid", "flashAt", "sessionID", "name", "tool", "notice", "sessions"],
   additionalProperties: false,
 } as const
 
@@ -67,6 +69,7 @@ export const FishState = {
           digest: { type: "string" },
           sleeping: { type: "boolean" },
           running: { type: "array", items: { type: "string" } },
+          lang: { type: "string" },
         },
         required: ["sessionID", "digest", "sleeping", "running"],
         additionalProperties: false,
@@ -81,12 +84,15 @@ export const FishState = {
       input: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
       output: state,
     },
+    name: {
+      input: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false },
+      output: state,
+    },
     todoAdd: {
       input: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
       output: state,
     },
     todoClear: { input: empty, output: state },
-    weather: { input: empty, output: state },
     resetBrain: { input: empty, output: state },
   },
   events: { state: { schema: state } },

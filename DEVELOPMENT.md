@@ -3,7 +3,9 @@
 ## build/ —— GUI 源码与资产管线
 
 - `logic.js`：GUI 逻辑源（改这里，不要改 cjs）
-- `gen-assets.py` + `assets/`：27 段 480×270 VP9-alpha webm + 鸭子音效 → base64 常量 `head.js`（脚本目录自包含）
+- `pools.json`：动画池配置（idle/turn/move 权重、五个分类池、点击/工作/余额/睡觉/碎碎念事件池、cue 映射）——加减动画只改这里
+- `gen-assets.py` + `assets/`：按 pools.json 把全部 webm + 鸭子音效 base64 成 head.js（ASSETS + POOLS 常量）；引用缺文件=构建失败
+- `encode-all.sh`：从 dsh-pet 安装包批量重编码全部素材（480×270 VP9-alpha，保 alpha 配方）到 assets/；首次全量入库时用过
 - `build.sh`：拼接 head.js + logic.js → 写入插件目录，`node --check` 校验；桌面端经 `plugin.updated` 热重载
 - `surgery-v4.py` / `tail-extract.cjs`：v4 迁移期的一次性工具，留档
 

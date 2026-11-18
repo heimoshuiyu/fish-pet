@@ -1,6 +1,6 @@
 {
   "name": "opencode-fish-pet",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "OpenCode 桌面宠物：跟随会话状态的大肥鱼（碎碎念/对话/待办/天气/余额六档），窗口内渲染. An OpenCode V2 desktop pet fish that follows your coding sessions",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
