@@ -1,0 +1,22 @@
+{
+  "name": "opencode-fish-pet",
+  "version": "0.6.0",
+  "description": "OpenCode 桌面宠物：跟随会话状态的大肥鱼（碎碎念/对话/待办/天气/余额六档），窗口内渲染. An OpenCode V2 desktop pet fish that follows your coding sessions",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "heimoshuiyu",
+  "keywords": ["opencode-plugin", "opencode", "pet", "desktop-pet"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heimoshuiyu/fish-pet.git"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./rpc": "./rpc.ts",
+    "./gui-experimental": "./gui-experimental.cjs"
+  },
+  "files": ["index.ts", "rpc.ts", "gui-experimental.cjs", "README.md", "LICENSE"],
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.0 <3"
+  }
+}

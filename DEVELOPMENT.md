@@ -11,6 +11,11 @@
 
 ## 开发循环
 
+> 当前本机跑的是 **npm 安装版**（`opencode plugin add opencode-fish-pet`，装在 `~/.cache/opencode/npm/`），
+> 本地开发副本已挪到 `.live-backup/fish-pet-pre-npm`（不能留在 plugins/ 目录里——同名 id 会双开冲突）。
+> 恢复本地开发：把备份拷回 `~/.config/opencode/plugins/fish-pet/` 并从 opencode.json 删掉
+> `"opencode-fish-pet"` 条目；发新版则改完直接 `npm publish`（绕 2FA 的粒度令牌在本机 ~/.npmrc，90 天有效）。
+
 本仓库是源，live 部署目标是 `~/.config/opencode/plugins/fish-pet/`（auto-discovery）：
 
 ```bash
