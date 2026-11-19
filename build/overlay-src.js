@@ -34,7 +34,7 @@ const FISH_OVERLAY_PAGE_STR = {
       sleep: "睡觉", wake: "起来", randomMove: "换个动作", chat: "开聊", todoAdd: "记一笔待办",
       todoList: "待办列表", todoClear: "清空待办", murmur: "碎碎念一句", balance: "查余额", nameFish: "起个名字",
       resetBrain: "重置鱼脑", notifyOn: "开完成通知", notifyOff: "关完成通知", whisperOn: "开碎碎念", whisperOff: "关碎碎念",
-      bigger: "大一点", smaller: "小一点", lang: "语言", back: "返回", ok: "记下",
+      bigger: "大一点", smaller: "小一点", lang: "语言", back: "返回", ok: "记下", quit: "退出宠物",
     },
     bubbles: {
       chatFallback: "聊天面板在会话侧栏里～", replyErrorShort: "模型出岔子了…",
@@ -54,7 +54,7 @@ const FISH_OVERLAY_PAGE_STR = {
       sleep: "Sleep", wake: "Wake up", randomMove: "Another move", chat: "Let's chat", todoAdd: "Add a to-do",
       todoList: "To-do list", todoClear: "Clear to-dos", murmur: "Say something", balance: "Check balance", nameFish: "Name the fish",
       resetBrain: "Reset brain", notifyOn: "Turn notifications on", notifyOff: "Turn notifications off", whisperOn: "Turn muttering on", whisperOff: "Turn muttering off",
-      bigger: "Bigger", smaller: "Smaller", lang: "Language", back: "Back", ok: "Save",
+      bigger: "Bigger", smaller: "Smaller", lang: "Language", back: "Back", ok: "Save", quit: "Quit pet",
     },
     bubbles: {
       chatFallback: "The chat panel lives in the session sidebar~", replyErrorShort: "Model hiccup…",
@@ -74,7 +74,7 @@ const FISH_OVERLAY_PAGE_STR = {
       sleep: "寝る", wake: "起きる", randomMove: "別の動き", chat: "おしゃべり", todoAdd: "todoを追加",
       todoList: "todoリスト", todoClear: "todoを全消し", murmur: "ひとこと", balance: "残高チェック", nameFish: "名前をつける",
       resetBrain: "脳をリセット", notifyOn: "通知をつける", notifyOff: "通知をけす", whisperOn: "ひとことオン", whisperOff: "ひとことオフ",
-      bigger: "大きく", smaller: "小さく", lang: "言語", back: "戻る", ok: "メモ",
+      bigger: "大きく", smaller: "小さく", lang: "言語", back: "戻る", ok: "メモ", quit: "ペットをやめる",
     },
     bubbles: {
       chatFallback: "チャットパネルはセッションのサイドバーにあるよ〜", replyErrorShort: "モデルがミスしたみたい…",
@@ -351,6 +351,7 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     });
     appendItem(T().menu.bigger, function () { closeMenu(); try { fishIpc.send("bigger"); } catch (err) {} });
     appendItem(T().menu.smaller, function () { closeMenu(); try { fishIpc.send("smaller"); } catch (err) {} });
+    appendItem(T().menu.quit, function () { closeMenu(); try { fishIpc.send("quit"); } catch (err) {} });
     appendItem(T().menu.lang, function () { buildLangPage(e); });
     placeMenu(e);
   }

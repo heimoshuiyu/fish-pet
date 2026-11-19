@@ -331,6 +331,9 @@ function fishOverlayMain(ctx) {
   let execStopped = true; // watchExec 启动后翻 false；cleanup 置回 true 终止循环
   let overlayDir = null;
   let cleaned = false;
+  let sawMainWindow = false; // 启动门控：见过至少一个主窗口后才允许"最后一个主窗口关闭→退出"
+  let windowsCloseUnsub = null; // ctx.windows.on("close") 返回的 Cleanup
+  let windowsOpenUnsub = null; // ctx.windows.on("open") 返回的 Cleanup
 
   // 逐次读取 client（官方约定：server 重启后 ctx.client 是新对象，旧 client 调用只会一直拒绝）
   const rpcNow = () => {
@@ -455,9 +458,24 @@ function fishOverlayMain(ctx) {
   };
 
   const setMode = (next, why) => {
-    if (next !== "off" && next !== "pending" && next !== "active") next = "off";
+    if (next !== "off" && next !== "pending" && next !== "active" && next !== "dismissed") next = "off";
     if (next === mode) return;
     mode = next;
+    if (next === "dismissed") {
+      // 用户退出宠物：停掉无意义的心跳/presence/余额定时（窗口已销毁 push 本就空转，这里少发请求）
+      try {
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        heartbeatTimer = 0;
+      } catch {}
+      try {
+        if (presenceTimer) clearInterval(presenceTimer);
+        presenceTimer = 0;
+      } catch {}
+      try {
+        if (balanceTimer) clearInterval(balanceTimer);
+        balanceTimer = 0;
+      } catch {}
+    }
     log("info", "mode", { mode, why: why || "" });
     pushOverlayState();
   };
@@ -578,6 +596,29 @@ function fishOverlayMain(ctx) {
     return () => {};
   }
 
+  // ---------- 主窗口生命周期跟随：最后一个主窗口关闭时销毁 overlay，让宿主 window-all-closed 退出继续 ----------
+  // sawMainWindow 门控：启动时 overlay 可能先于第一个主窗口出现，没见过主窗口不触发退出。
+  // 多窗 2→1 不退（list 非空），多窗 1→0 destroy overlay → Electron 计数归零 → app 正常退出。
+  try {
+    const initialList = ctx.windows.list?.() ?? [];
+    if (initialList.length) sawMainWindow = true;
+    windowsOpenUnsub = ctx.windows.on("open", () => {
+      sawMainWindow = true;
+    });
+    windowsCloseUnsub = ctx.windows.on("close", () => {
+      if (cleaned || mode === "dismissed") return;
+      const remaining = ctx.windows.list?.() ?? [];
+      if (sawMainWindow && !remaining.length) {
+        log("info", "last main window closed, destroying overlay", { mode });
+        try {
+          if (win && !win.isDestroyed()) win.destroy();
+        } catch {}
+      }
+    });
+  } catch (cause) {
+    log("warn", "windows lifecycle listener failed", { error: String(cause) });
+  }
+
   const cleanup = (reason) => {
     if (cleaned) return;
     cleaned = true;
@@ -613,6 +654,12 @@ function fishOverlayMain(ctx) {
     detachStateListener();
     try {
       if (cmdHandler) require("electron").ipcMain.removeListener("fish-pet:cmd", cmdHandler);
+    } catch {}
+    try {
+      if (windowsCloseUnsub) windowsCloseUnsub();
+    } catch {}
+    try {
+      if (windowsOpenUnsub) windowsOpenUnsub();
     } catch {}
     try {
       if (win && !win.isDestroyed()) win.destroy();
@@ -897,6 +944,7 @@ function fishOverlayMain(ctx) {
     win.on("closed", () => {
       log("info", "overlay window closed", {});
       if (cleaned) return;
+      if (mode === "dismissed") return; // 用户主动退出：closed 是 destroy 的正常路径，不回退 off
       setMode("off", "window closed");
     });
     // 渲染进程崩溃：销毁坏窗（触发上面的 closed → 回退窗口鱼）；不自动重建，避免无限重启面
@@ -1069,6 +1117,15 @@ function fishOverlayMain(ctx) {
                 push();
                 log("warn", "reset failed", {});
               });
+          }
+        } else if (cmd === "quit") {
+          // 用户右键退出宠物（不退 OpenCode）：dismissed + 销毁；窗口鱼不弹回，
+          // plugin reload/应用重开恢复。WM 手关 overlay 仍走 closed → off 回退，与本路径区分。
+          setMode("dismissed", "user quit");
+          try {
+            if (win && !win.isDestroyed()) win.destroy();
+          } catch (cause) {
+            log("warn", "quit destroy failed", { error: String(cause) });
           }
         } else if (cmd === "balance") {
           void runBalance(true);
@@ -2757,11 +2814,11 @@ module.exports.default = Plugin.define((() => {
         }
       };
       const applyOverlayMode = (mode) => {
-        if (mode !== "off" && mode !== "pending" && mode !== "active") mode = "off";
+        if (mode !== "off" && mode !== "pending" && mode !== "active" && mode !== "dismissed") mode = "off";
         if (mode === overlayMode) return;
         overlayMode = mode;
-        if (mode === "active") {
-          if (fishes.length) unmountAllFish(); // 桌外鱼接管展示：窗口内鱼隐藏
+        if (mode === "active" || mode === "dismissed") {
+          if (fishes.length) unmountAllFish(); // 桌外鱼接管或用户退出：窗口内鱼隐藏
         } else if (mode === "off") {
           mountFromPrefs();
         }
