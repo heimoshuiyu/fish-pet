@@ -1,11 +1,16 @@
 {
   "name": "opencode-fish-pet",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "OpenCode V2 desktop pet fish that follows your coding sessions, in-window and as a native desktop overlay",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "author": "heimoshuiyu",
-  "keywords": ["opencode-plugin", "opencode", "pet", "desktop-pet"],
+  "keywords": [
+    "opencode-plugin",
+    "opencode",
+    "pet",
+    "desktop-pet"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/heimoshuiyu/fish-pet.git"
@@ -15,7 +20,13 @@
     "./rpc": "./rpc.ts",
     "./gui-experimental": "./gui-experimental.cjs"
   },
-  "files": ["index.ts", "rpc.ts", "gui-experimental.cjs", "README.md", "LICENSE"],
+  "files": [
+    "index.ts",
+    "rpc.ts",
+    "gui-experimental.cjs",
+    "README.md",
+    "LICENSE"
+  ],
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.0 <3"
   }

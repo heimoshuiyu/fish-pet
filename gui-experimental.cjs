@@ -967,7 +967,8 @@ const buildPrefs = () => {
 // =========================================================
 // 桌外 overlay main（Electron 主进程，app-scoped 单例；Web 永不运行）
 // - 凭据/RPC 只留在 main：页面只能收到显示状态（tier/flash/notice/碎碎念/余额文案）与素材 data URI
-// - options.overlay 开关：包默认关；失败/超时回退窗口内鱼（mode → off + 事件广播）
+// - Desktop 默认启用（旧 options.overlay 字段被忽略，无 schema 拒绝）；
+//   Electron/Ipc 能力缺失、文件/窗口创建/加载/show 失败仍回退窗口内鱼
 // - 不依赖 Wayland 不可信的 setPosition/getBounds：窗口位置交给 Sway 浮动 con（app-region/Sway 拖拽）
 // =========================================================
 function fishOverlayMain(ctx) {
@@ -996,8 +997,8 @@ function fishOverlayMain(ctx) {
     }
   };
 
-  const enabled = !!(ctx.options && ctx.options.overlay);
-  let mode = enabled ? "pending" : "off";
+  // Desktop 默认启用 overlay：旧 options.overlay 字段被 host 透传但本插件彻底忽略（Record<string,unknown>，无 schema 拒绝）
+  let mode = "pending";
   let langPref = "en";
   let win = null;
   let loaded = false;
@@ -1285,11 +1286,7 @@ function fishOverlayMain(ctx) {
     log("error", "provide failed", { error: String(cause) });
     return;
   }
-  log("info", "main setup started", { id: ctx.id, enabled, mode, platform: process.platform });
-  if (!enabled) {
-    setMode("off", "disabled by options");
-    return () => {};
-  }
+  log("info", "main setup started", { id: ctx.id, mode, platform: process.platform });
 
   // ---------- 主窗口生命周期跟随：最后一个主窗口关闭时销毁 overlay，让宿主 window-all-closed 退出继续 ----------
   // sawMainWindow 门控：启动时 overlay 可能先于第一个主窗口出现，没见过主窗口不触发退出。
