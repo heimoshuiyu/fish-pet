@@ -220,6 +220,7 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
   }
   function rollNext() {
     if (S.sleeping) return; // 睡觉链由 wake() 重排
+    if (dragActive) return scheduleRoll(15000); // Windows 拖动期间不让随机动作抢拖拽片
     if (S.chatBusy || S.tier || S.flash) return scheduleRoll(15000); // 会话/工作期：链不能死，慢续
     var W = POOLS.weights;
     var roll = Math.random() * 100;
@@ -259,81 +260,60 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     play(pick(POOLS.clicks), { onEnded: toState });
   }
 
-  // ---- win32 拖动：按住鱼身 pointer capture，位移量经 IPC 给 main setPosition ----
-  // 坐标差取 e.screenX/Y（窗口自身移动不影响 screen 系，避免反馈停住）；阈值区分点击/拖动；
-  // 释放点（pointerup 未过阈值）才 poke，拖动不 poke；right-click 不触发。
-  // rAF 合帧：pending 累计同帧多 move 一次发送；end 取消未发 rAF 且闭包内再校验 active；
+  // ---- win32 拖动：renderer 只报手势（dragStart/dragEnd/dragCancel），位移零 IPC ----
+  // main 以 screen.getCursorScreenPoint() 为锚全程 DIP 跟随 + 惯性物理（mixed DPI 安全）。
+  // 页面保留 pointer capture、5px 点击阈值与释放点 poke；拖动视觉片本地播；
+  // 落地由 main 经固定白名单通道 fish-pet:motion {kind:"land"} 通知 squash/toState。
   // endDrag 幂等：统一摘除 move/up/cancel/lostpointercapture 四监听并 release capture。
   var dragEnabled = D.drag === true; // main 注入：仅 win32 为 true
   var dragActive = false;
   var dragMoved = false;
   var dragStartX = 0, dragStartY = 0;
-  var dragLastX = 0, dragLastY = 0;
-  var pendingDx = 0, pendingDy = 0;
-  var dragRafPending = false;
-  var dragRaf = 0;
   var dragPointerId = 0;
   var DRAG_THRESHOLD = 5;
-  function sendDragDelta(dx, dy) {
-    try { fishIpc.send("drag", dx + "," + dy); } catch (e) {}
-  }
-  function flushDrag() {
-    dragRaf = 0;
-    dragRafPending = false;
-    if (!dragActive) return; // end 已清理：迟到的帧不得再移动窗口
-    var dx = Math.round(pendingDx);
-    var dy = Math.round(pendingDy);
-    pendingDx -= dx;
-    pendingDy -= dy;
-    if (dx || dy) sendDragDelta(dx, dy);
-  }
-  function dragMove(e) {
-    if (!dragActive) return;
-    var dx = e.screenX - dragLastX;
-    var dy = e.screenY - dragLastY;
-    if (dx === 0 && dy === 0) return;
-    dragLastX = e.screenX;
-    dragLastY = e.screenY;
-    pendingDx += dx;
-    pendingDy += dy;
-    // 曼哈顿阈值：未越过前只累计不发；越过时整段补发，窗口一次跟到位
-    if (!dragMoved && Math.abs(e.screenX - dragStartX) + Math.abs(e.screenY - dragStartY) < DRAG_THRESHOLD) return;
-    dragMoved = true;
-    if (dragRafPending) return;
-    dragRafPending = true;
-    dragRaf = requestAnimationFrame(flushDrag);
-  }
-  function endDrag() {
+  var reduced = function () { return matchMedia("(prefers-reduced-motion: reduce)").matches; };
+  function endDrag(kind) {
     if (!dragActive) return; // 幂等：up→lostpointercapture 等重复终态直接返回
     dragActive = false;
-    if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = 0; }
-    dragRafPending = false;
-    pendingDx = 0;
-    pendingDy = 0;
     hit.removeEventListener("pointermove", dragMove);
     hit.removeEventListener("pointerup", dragUp);
     hit.removeEventListener("pointercancel", dragCancel);
     hit.removeEventListener("lostpointercapture", dragLost);
     try { hit.releasePointerCapture(dragPointerId); } catch (e) {}
-    try { fishIpc.send("dragEnd"); } catch (e) {}
+    if (kind === "cancel") {
+      try { fishIpc.send("dragCancel"); } catch (e) {}
+      toState(); // 收摊：回状态片（main 不飞、也不再发 land）
+    } else if (kind === "click") {
+      // 手势分类归页面：单击显式上报 'click'，main 仅收摊不 land（不打断 poke 视觉）
+      try { fishIpc.send("dragEnd", "click"); } catch (e) {}
+      poke();
+    } else {
+      // 拖动释放（boolean reduced）：main 以速度门判飞/落；mixed DPI 下即便 main 侧状态缺失，
+      // 非 click 的 dragEnd 也必须换来 land，页面才能收掉 drag 片
+      try { fishIpc.send("dragEnd", reduced()); } catch (e) {}
+    }
+  }
+  function dragMove(e) {
+    if (!dragActive) return;
+    // 只判阈值（screen 系不受窗口移动影响）；不发任何位移；首次过阈值才播拖拽片，单击不闪帧
+    if (!dragMoved && Math.abs(e.screenX - dragStartX) + Math.abs(e.screenY - dragStartY) >= DRAG_THRESHOLD) {
+      dragMoved = true;
+      if (POOLS.names.drag) play(POOLS.names.drag, { loop: true });
+    }
   }
   function dragUp() {
-    if (!dragMoved) poke(); // 阈值内释放 = 点击：poke 只发生在此时
-    endDrag();
+    endDrag(dragMoved ? "release" : "click");
   }
-  function dragCancel() { endDrag(); }
-  function dragLost() { endDrag(); }
+  function dragCancel() { endDrag("cancel"); }
+  function dragLost() { endDrag("cancel"); }
   function startDrag(e) {
     dragActive = true;
     dragMoved = false;
     dragStartX = e.screenX;
     dragStartY = e.screenY;
-    dragLastX = e.screenX;
-    dragLastY = e.screenY;
-    pendingDx = 0;
-    pendingDy = 0;
     dragPointerId = e.pointerId;
     try { hit.setPointerCapture(e.pointerId); } catch (ex) { dragActive = false; return; }
+    try { fishIpc.send("dragStart"); } catch (ex) {}
     hit.addEventListener("pointermove", dragMove);
     hit.addEventListener("pointerup", dragUp);
     hit.addEventListener("pointercancel", dragCancel);
@@ -574,6 +554,12 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
         }
       });
     }
+    if (fishIpc.onMotion) {
+      // win32 惯性落点（慢释放 settle 与物理落地同走 land）：squash + 回状态片
+      fishIpc.onMotion(function (mo) {
+        if (mo && mo.kind === "land") { squash(); toState(); }
+      });
+    }
   }
 })();
 `;
@@ -590,6 +576,10 @@ contextBridge.exposeInMainWorld("fishIpc", {
   },
   onAsset: function (cb) {
     ipcRenderer.on("fish-pet:asset", function (_e, a) { cb(a); });
+  },
+  onMotion: function (cb) {
+    // 固定白名单通道：main 仅推 {kind:"land"} 一类手势终态通知，不开放通用 IPC
+    ipcRenderer.on("fish-pet:motion", function (_e, mo) { cb(mo); });
   },
   send: function (cmd, value) {
     if (typeof cmd !== "string" || !/^[a-zA-Z]+$/.test(cmd)) return; // cmd 白名单含大写（todoAdd/murmurGate）；语义由 main 逐 cmd 校验
@@ -617,6 +607,7 @@ function composeOverlayHtml(assets, pools, clickSound, initialLang, initialWidth
   };
   add(pools.names && pools.names.idle);
   add(pools.names && pools.names.turn);
+  add(pools.names && pools.names.drag); // win32 拖动视觉片随子集嵌入
   (pools.sleep || []).forEach(add);
   (pools.clicks || []).forEach(add);
   (pools.work || []).forEach(add);
@@ -627,7 +618,7 @@ function composeOverlayHtml(assets, pools, clickSound, initialLang, initialWidth
   for (const name of need) subset[name] = assets[name];
   const data = {
     pools: {
-      names: { idle: pools.names && pools.names.idle, turn: pools.names && pools.names.turn },
+      names: { idle: pools.names && pools.names.idle, turn: pools.names && pools.names.turn, drag: pools.names && pools.names.drag },
       clicks: pools.clicks || [],
       work: pools.work || [],
       whisper: pools.whisper || [],

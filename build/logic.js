@@ -335,6 +335,16 @@ function fishOverlayMain(ctx) {
   let sawMainWindow = false; // 启动门控：见过至少一个主窗口后才允许"最后一个主窗口关闭→退出"
   let windowsCloseUnsub = null; // ctx.windows.on("close") 返回的 Cleanup
   let windowsOpenUnsub = null; // ctx.windows.on("open") 返回的 Cleanup
+  let motion = null; // win32 拖动/惯性引擎状态：{phase:"drag"|"throw", timer, ...}；仅 drag/throw 期间存在，无常驻轮询
+  // 中心收摊：一切终态（释放/落地/cancel/抢占/退出/cleanup）都走这里，杜绝旧循环竞争
+  const stopMotion = () => {
+    if (motion && motion.timer) {
+      try {
+        clearInterval(motion.timer);
+      } catch {}
+    }
+    motion = null;
+  };
 
   // 逐次读取 client（官方约定：server 重启后 ctx.client 是新对象，旧 client 调用只会一直拒绝）
   const rpcNow = () => {
@@ -641,6 +651,9 @@ function fishOverlayMain(ctx) {
       } catch {}
     }
     prefetchTimers = [];
+    try {
+      stopMotion(); // 飞行中插件收摊：帧循环必须随一切终止
+    } catch {}
     execStopped = true; // 终止 execution 监督循环
     try {
       if (execRetryTimer) clearTimeout(execRetryTimer);
@@ -941,6 +954,7 @@ function fishOverlayMain(ctx) {
     // WM/程序关闭（非 cleanup 自身 destroy）：回退窗口内鱼；cleanup 路径 cleaned=true 不重复 mode/事件
     win.on("closed", () => {
       log("info", "overlay window closed", {});
+      stopMotion(); // WM 手关时飞行必停
       if (cleaned) return;
       if (mode === "dismissed") return; // 用户主动退出：closed 是 destroy 的正常路径，不回退 off
       setMode("off", "window closed");
@@ -948,6 +962,7 @@ function fishOverlayMain(ctx) {
     // 渲染进程崩溃：销毁坏窗（触发上面的 closed → 回退窗口鱼）；不自动重建，避免无限重启面
     win.webContents.on("render-process-gone", (_event, details) => {
       log("error", "render-process-gone", { reason: details?.reason, exitCode: details?.exitCode });
+      stopMotion();
       if (cleaned) return;
       try {
         if (win && !win.isDestroyed()) win.destroy();
@@ -967,6 +982,126 @@ function fishOverlayMain(ctx) {
     }
 
     // ---------- 页 → main 命令（开聊/手动碎碎念/手动余额）：只认本窗口 sender ----------
+    // ---------- win32 惯性拖动引擎（main 全程 DIP：screen 光标锚 + setPosition，renderer 零位移 IPC） ----------
+    // 参数与窗口版 throwFish 同源：g=1600、侧/地 rest=0.72、顶=0.5、dt≤0.05、落地 |vy|>240 才反弹、
+    // 地面逐帧 vx*=0.86、|vx|<24 停、释放 |vx|<90 且 |vy|<90 不飞。物理内部浮点，setPosition 时 round。
+    const sendMotion = (kind) => {
+      try {
+        if (win && !win.isDestroyed()) win.webContents.send("fish-pet:motion", { kind });
+      } catch {}
+    };
+    const dragTick = () => {
+      if (!win || win.isDestroyed() || !motion || motion.phase !== "drag") {
+        sendMotion("land"); // 异常态收摊：让页面回 state（win 已毁时 sendMotion 自身守卫为 no-op）
+        return stopMotion();
+      }
+      try {
+        const c = electron.screen.getCursorScreenPoint();
+        const x = Math.round(c.x - motion.grabX);
+        const y = Math.round(c.y - motion.grabY);
+        if (x !== motion.lastSetX || y !== motion.lastSetY) {
+          motion.lastSetX = x;
+          motion.lastSetY = y;
+          win.setPosition(x, y);
+        }
+        motion.samples.push({ t: Date.now(), x: c.x, y: c.y });
+        if (motion.samples.length > 6) motion.samples.shift();
+      } catch {
+        sendMotion("land");
+        stopMotion();
+      }
+    };
+    const stageGeom = () => {
+      // 与页 setSize 同式的镜像：舞台宽来自 server state width（120..320），窗口内水平居中、距窗底 10px
+      const c = Math.max(120, Math.min(320, Math.round(st && typeof st.width === "number" ? st.width : 200)));
+      return { c, sh: Math.round((c * 9) / 16) };
+    };
+    const throwTick = () => {
+      if (!win || win.isDestroyed() || !motion || motion.phase !== "throw") {
+        sendMotion("land"); // 异常态收摊：让页面回 state（win 已毁时为 no-op）
+        return stopMotion();
+      }
+      const now = Date.now();
+      const dt = Math.min(0.05, (now - motion.last) / 1000); // 窗口版同 clamp：防后台巨步
+      motion.last = now;
+      motion.vy += 1600 * dt; // g
+      motion.x += motion.vx * dt;
+      motion.y += motion.vy * dt;
+      // 虚拟桌面外包并集（每帧重算少量 displays：插拔/分辨率/缩放变化即时生效；负 origin 天然支持）。
+      // 注意是所有 display bounds 的外框，不是任何单屏，屏幕接缝不反弹。
+      let displays = [];
+      try {
+        displays = electron.screen.getAllDisplays();
+      } catch {
+        sendMotion("land");
+        return stopMotion();
+      }
+      if (!displays.length) {
+        sendMotion("land"); // 空显示器列表：停且通知，页面不留 drag 片
+        return stopMotion();
+      }
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const d of displays) {
+        minX = Math.min(minX, d.bounds.x);
+        minY = Math.min(minY, d.bounds.y);
+        maxX = Math.max(maxX, d.bounds.x + d.bounds.width);
+        maxY = Math.max(maxY, d.bounds.y + d.bounds.height);
+      }
+      let ww = 360;
+      let wh = 240;
+      try {
+        const s = win.getSize();
+        ww = s[0];
+        wh = s[1];
+      } catch {} // getSize 失败用窗口标称尺寸兜底
+      const { c, sh } = stageGeom();
+      const m = 8; // 边缘余量（窗口版同值）：鱼身贴外缘
+      const offL = (ww - c) / 2; // 舞台左缘距窗口左
+      const offTop = wh - 10 - sh; // 舞台顶距窗口顶
+      const offBot = wh - 10; // 舞台底距窗口顶
+      // 墙作用在舞台矩形上、以窗口 top-left 表达；窗口透明边可越出桌面，视觉上鱼贴缘
+      if (motion.x < minX + m - offL) {
+        motion.x = minX + m - offL;
+        motion.vx = Math.abs(motion.vx) * 0.72;
+      }
+      if (motion.x > maxX - m - offL - c) {
+        motion.x = maxX - m - offL - c;
+        motion.vx = -Math.abs(motion.vx) * 0.72;
+      }
+      if (motion.y < minY + m - offTop) {
+        motion.y = minY + m - offTop;
+        motion.vy = Math.abs(motion.vy) * 0.72 * 0.5; // 顶边阻尼（窗口版同）
+      }
+      const floor = maxY - m - offBot;
+      if (motion.y >= floor) {
+        motion.y = floor;
+        if (Math.abs(motion.vy) > 240) {
+          motion.vy = -Math.abs(motion.vy) * 0.72;
+        } else {
+          motion.vy = 0;
+          motion.vx *= 0.86; // 地面摩擦（窗口版逐帧同值）
+          if (Math.abs(motion.vx) < 24) {
+            sendMotion("land"); // 落地：通知页 squash/toState
+            return stopMotion();
+          }
+        }
+      }
+      try {
+        const rx = Math.round(motion.x);
+        const ry = Math.round(motion.y);
+        if (rx !== motion.lastSetX || ry !== motion.lastSetY) {
+          motion.lastSetX = rx;
+          motion.lastSetY = ry;
+          win.setPosition(rx, ry);
+        }
+      } catch {
+        sendMotion("land"); // setPosition 失败：停且通知，页面不留 drag 片
+        stopMotion();
+      }
+    };
     cmdHandler = (event, data) => {
       if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
       const cmd = data && typeof data.cmd === "string" ? data.cmd : "";
@@ -1120,26 +1255,88 @@ function fishOverlayMain(ctx) {
           // 用户右键退出宠物（不退 OpenCode）：dismissed + 销毁；窗口鱼不弹回，
           // plugin reload/应用重开恢复。WM 手关 overlay 仍走 closed → off 回退，与本路径区分。
           setMode("dismissed", "user quit");
+          stopMotion(); // 飞行中退出：先停帧循环再毁窗
           try {
             if (win && !win.isDestroyed()) win.destroy();
           } catch (cause) {
             log("warn", "quit destroy failed", { error: String(cause) });
           }
-        } else if (cmd === "drag") {
-          // win32 拖动：页面 pointer capture 跟踪，位移量 "dx,dy" 字符串。main 严格格式校验后 setPosition。
-          // 非 win32 或 win destroyed 忽略；格式先行（Number("")===0 会放过 ","）；范围 ±10000 防越界。
+        } else if (cmd === "dragStart") {
+          // win32 拖动开始：renderer 只报手势（零位移 IPC）；main 以光标为锚全程 DIP 跟随。
+          // throw 中再按下 = 抢占抓住飞行中的鱼；重复 start 幂等重启。
           if (process.platform !== "win32" || !win || win.isDestroyed()) return;
-          const v = data && typeof data.value === "string" ? data.value : "";
-          if (!/^-?\d+,-?\d+$/.test(v)) return;
-          const dx = Number(v.split(",")[0]);
-          const dy = Number(v.split(",")[1]);
-          if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.abs(dx) > 10000 || Math.abs(dy) > 10000) return;
           try {
-            const [x, y] = win.getPosition();
-            win.setPosition(x + dx, y + dy);
-          } catch {}
+            const p = win.getPosition();
+            const c = electron.screen.getCursorScreenPoint();
+            stopMotion();
+            motion = {
+              phase: "drag",
+              timer: 0,
+              grabX: c.x - p[0],
+              grabY: c.y - p[1],
+              lastSetX: p[0],
+              lastSetY: p[1],
+              samples: [{ t: Date.now(), x: c.x, y: c.y }],
+            };
+            motion.timer = setInterval(dragTick, 16);
+          } catch (cause) {
+            log("warn", "dragStart failed", { error: String(cause) });
+          }
         } else if (cmd === "dragEnd") {
-          // 拖动结束：无操作（presence 不变；win32 下 setPosition 已即时生效）
+          // 手势分类归页面：'click'=单击（仅收摊不 land，不打断 poke）；其余=拖动释放（boolean reduced）。
+          // main 不再用自身坐标阈值判 click；非 click 释放无论 motion/样本状态如何都让页面收尾——
+          // mixed DPI 下页面判拖、main 状态缺失时页面仍能等到 land 回 state。
+          if (process.platform !== "win32") return;
+          if (data && data.value === "click") {
+            stopMotion();
+            return;
+          }
+          if (motion && motion.phase === "throw") return; // 飞行中无 capture，防御性忽略
+          if (!motion || motion.phase !== "drag") {
+            sendMotion("land"); // main 侧未启动/已丢状态：页面仍需回 state（win 毁则 no-op）
+            return;
+          }
+          const reduced = !!(data && data.value === true);
+          try {
+            clearInterval(motion.timer);
+          } catch {}
+          motion.timer = 0;
+          const s1 = motion.samples[0];
+          const s2 = motion.samples[motion.samples.length - 1];
+          let vx = 0;
+          let vy = 0;
+          if (s2 && s1 && s2.t > s1.t) {
+            vx = ((s2.x - s1.x) / (s2.t - s1.t)) * 1000;
+            vy = ((s2.y - s1.y) / (s2.t - s1.t)) * 1000;
+          }
+          if (reduced || (Math.abs(vx) < 90 && Math.abs(vy) < 90)) {
+            sendMotion("land"); // 慢释放/样本不足：就地 squash（窗口版 land 同义）
+            stopMotion();
+            return;
+          }
+          try {
+            const p = win.getPosition();
+            motion = {
+              phase: "throw",
+              timer: 0,
+              x: p[0],
+              y: p[1],
+              vx,
+              vy,
+              last: Date.now(),
+              lastSetX: p[0],
+              lastSetY: p[1],
+            };
+            motion.timer = setInterval(throwTick, 16);
+          } catch (cause) {
+            sendMotion("land"); // throw init 失败也收尾：页面不留 drag 片
+            stopMotion();
+            log("warn", "throw init failed", { error: String(cause) });
+          }
+        } else if (cmd === "dragCancel") {
+          // pointercancel/lostcapture：收摊不飞（throw 阶段无 capture，不会到达；防御性忽略）
+          if (process.platform !== "win32" || !motion || motion.phase !== "drag") return;
+          stopMotion();
         } else if (cmd === "balance") {
           void runBalance(true);
         }

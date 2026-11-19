@@ -473,6 +473,32 @@ export default {
     // 语言（独立开关，随 focus 心跳到达）：影响碎碎念/对话提示词、完成气泡后缀、会话标题
     const slang = (): FishLang => (serverLang in L10N ? serverLang : "en")
 
+    // ---------- 鱼脑专用 agent：隐藏内部代理，system 携带 persona ----------
+    // 固定 id "fish-pet"（与插件同名）。只写插件拥有的 name/description/mode/hidden/system 五个字段；
+    // permissions/model/request/steps 一律不碰——保持 Agent.Info 默认开发权限（allow-all + env ask），
+    // 用户 config 同名 agent 的这些字段也不被覆盖。system 闭包读 live serverLang：
+    // language RPC 改语言后 agent.reload() 重放 transform 即换 persona，注册只有一次。
+    const FISH_AGENT_ID = "fish-pet"
+    let fishAgentReady = false // 旧宿主 fallback 闭环：仅 transform 注册成功才走专用 agent 语义
+    try {
+      await context.agent.transform((editor) => {
+        editor.update(FISH_AGENT_ID, (agent) => {
+          agent.name = "Fish"
+          agent.description = "fish-pet 的内部鱼脑代理（桌宠碎碎念/对话）"
+          agent.mode = "primary"
+          agent.hidden = true // 选择器/@提及/子代理目录不可见；session.create/switchAgent 仍可点名
+          agent.system = L10N[slang()].persona
+        })
+      })
+      fishAgentReady = true
+    } catch {
+      /* 旧宿主无 agent 域或注册失败：默认 agent + persona 留在消息内，其余语义不变 */
+    }
+    // 存量鱼会话一次性迁移（此前创建于默认 agent）；仅在专用 agent 就绪时进行，失败不阻断
+    if (fishAgentReady && fishSessionID) {
+      await context.session.switchAgent({ sessionID: fishSessionID, agent: FISH_AGENT_ID }).catch(() => {})
+    }
+
     const nowMs = () => performance.now()
 
     const snapshot = () => ({
@@ -733,14 +759,16 @@ export default {
         const text = trim(String(input.text ?? ""), 500)
         if (!text) return snapshot()
         // 面板聊天：没有会话就现建（空态承诺"直接发消息"）。
-        // 新会话首条带人格引导（WHISPER_MARK 前缀 → 面板隐藏这条内部消息）；
-        // 已有会话发原文，人格已在历史里。
+        // 新会话首条带引导（WHISPER_MARK 前缀 → 面板隐藏这条内部消息）；已有会话发原文。
+        // persona：专用 agent 就绪时常驻其 system（消息省略）；旧宿主回退为消息内携带
         const fresh = !fishSessionID
         const sid = await ensureFishSession()
         if (!sid) return snapshot()
         const L = L10N[slang()]
         const S = S10N[slang()]
-        const head = [L.persona, petName ? S.nameLine(petName) : ""].filter(Boolean).join("\n")
+        const head = [fishAgentReady ? undefined : L.persona, petName ? S.nameLine(petName) : ""]
+          .filter(Boolean)
+          .join("\n")
         const body = fresh
           ? [WHISPER_MARK, head, L.sayFresh, S.timeContext(new Date(), envFacts), `${L.sayLead}${text}`].filter(Boolean).join("\n\n")
           : text
@@ -783,6 +811,9 @@ export default {
         if (l === "zh" || l === "en" || l === "ja") {
           serverLang = l as FishLang
           await context.storage.set("lang", { lang: serverLang }).catch(() => {})
+          // 鱼脑 agent 的 system persona 是 transform 捕获的 live 值：重放 agent 域让新语言生效。
+          // ready 门禁保证旧宿主（无 agent 域）不会因缺失 API 使 language RPC 抛错
+          if (fishAgentReady) await context.agent.reload().catch(() => {})
         }
         emit()
         return snapshot()
@@ -1076,7 +1107,11 @@ export default {
           model = info?.model as { id: string; providerID: string; variant?: string } | undefined
         }
         const info = await context.session
-          .create({ title: L10N[slang()].title, ...(model?.id && model.providerID ? { model } : {}) })
+          .create({
+            title: L10N[slang()].title,
+            ...(fishAgentReady ? { agent: FISH_AGENT_ID } : {}),
+            ...(model?.id && model.providerID ? { model } : {}),
+          })
           .catch(() => undefined)
         if (info?.id) {
           fishSessionID = info.id
@@ -1114,7 +1149,10 @@ export default {
       const digest = opts.dream || !focus || Date.now() - focus.at > T.AUDIENCE_TTL ? "" : focus.digest
       const L = L10N[slang()]
       const S = S10N[slang()]
-      const head = [L.persona, petName ? S.nameLine(petName) : ""].filter(Boolean).join("\n")
+      // persona：专用 agent 就绪时常驻其 system；旧宿主回退为每条消息携带（name/time/cue 恒留消息）
+      const head = [fishAgentReady ? undefined : L.persona, petName ? S.nameLine(petName) : ""]
+        .filter(Boolean)
+        .join("\n")
       if (!envFacts || Date.now() - envFacts.at > 3600e3) void refreshEnv() // 陈旧就后台补一拍
       const text = [WHISPER_MARK, head, opts.dream ? L.dream : L.murmur(digest), S.timeContext(new Date(), envFacts), L.cue]
         .filter(Boolean)
