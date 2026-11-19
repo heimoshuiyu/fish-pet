@@ -94,7 +94,8 @@ const FISH_OVERLAY_LANG_NAMES = { zh: "中文", en: "English", ja: "日本語" }
 // 页面脚本：单鱼舞台（双 video 换源 + gen 防竞态，与窗口版同机制）+ 睡觉链 + 自主随机 roll +
 // 完整菜单（睡觉/动作/开聊/待办列表与录入/碎碎念/余额/起名/重置/通知与总开关/大小/语言）+
 // 状态应用（tier/flash/notice/murmur/balance/chatBusy/contract/开关与尺寸）。
-// 拖拽交给窗口管理器（app-region/Sway 浮动）；roll 的 move 权重并入 idle（overlay 无位移物理）。
+// 拖拽：Linux/Wayland 交给 WM（body app-region:drag + Sway $mod）；win32 由页内 pointer capture
+// 跟踪并经受限 IPC 发位移量，main 用 setPosition 移动（win32 下可靠）。不涉及甩出/重力。
 const FISH_OVERLAY_PAGE_JS = String.raw`
 "use strict";
 (function () {
@@ -257,9 +258,93 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     } catch (e) {}
     play(pick(POOLS.clicks), { onEnded: toState });
   }
+
+  // ---- win32 拖动：按住鱼身 pointer capture，位移量经 IPC 给 main setPosition ----
+  // 坐标差取 e.screenX/Y（窗口自身移动不影响 screen 系，避免反馈停住）；阈值区分点击/拖动；
+  // 释放点（pointerup 未过阈值）才 poke，拖动不 poke；right-click 不触发。
+  // rAF 合帧：pending 累计同帧多 move 一次发送；end 取消未发 rAF 且闭包内再校验 active；
+  // endDrag 幂等：统一摘除 move/up/cancel/lostpointercapture 四监听并 release capture。
+  var dragEnabled = D.drag === true; // main 注入：仅 win32 为 true
+  var dragActive = false;
+  var dragMoved = false;
+  var dragStartX = 0, dragStartY = 0;
+  var dragLastX = 0, dragLastY = 0;
+  var pendingDx = 0, pendingDy = 0;
+  var dragRafPending = false;
+  var dragRaf = 0;
+  var dragPointerId = 0;
+  var DRAG_THRESHOLD = 5;
+  function sendDragDelta(dx, dy) {
+    try { fishIpc.send("drag", dx + "," + dy); } catch (e) {}
+  }
+  function flushDrag() {
+    dragRaf = 0;
+    dragRafPending = false;
+    if (!dragActive) return; // end 已清理：迟到的帧不得再移动窗口
+    var dx = Math.round(pendingDx);
+    var dy = Math.round(pendingDy);
+    pendingDx -= dx;
+    pendingDy -= dy;
+    if (dx || dy) sendDragDelta(dx, dy);
+  }
+  function dragMove(e) {
+    if (!dragActive) return;
+    var dx = e.screenX - dragLastX;
+    var dy = e.screenY - dragLastY;
+    if (dx === 0 && dy === 0) return;
+    dragLastX = e.screenX;
+    dragLastY = e.screenY;
+    pendingDx += dx;
+    pendingDy += dy;
+    // 曼哈顿阈值：未越过前只累计不发；越过时整段补发，窗口一次跟到位
+    if (!dragMoved && Math.abs(e.screenX - dragStartX) + Math.abs(e.screenY - dragStartY) < DRAG_THRESHOLD) return;
+    dragMoved = true;
+    if (dragRafPending) return;
+    dragRafPending = true;
+    dragRaf = requestAnimationFrame(flushDrag);
+  }
+  function endDrag() {
+    if (!dragActive) return; // 幂等：up→lostpointercapture 等重复终态直接返回
+    dragActive = false;
+    if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = 0; }
+    dragRafPending = false;
+    pendingDx = 0;
+    pendingDy = 0;
+    hit.removeEventListener("pointermove", dragMove);
+    hit.removeEventListener("pointerup", dragUp);
+    hit.removeEventListener("pointercancel", dragCancel);
+    hit.removeEventListener("lostpointercapture", dragLost);
+    try { hit.releasePointerCapture(dragPointerId); } catch (e) {}
+    try { fishIpc.send("dragEnd"); } catch (e) {}
+  }
+  function dragUp() {
+    if (!dragMoved) poke(); // 阈值内释放 = 点击：poke 只发生在此时
+    endDrag();
+  }
+  function dragCancel() { endDrag(); }
+  function dragLost() { endDrag(); }
+  function startDrag(e) {
+    dragActive = true;
+    dragMoved = false;
+    dragStartX = e.screenX;
+    dragStartY = e.screenY;
+    dragLastX = e.screenX;
+    dragLastY = e.screenY;
+    pendingDx = 0;
+    pendingDy = 0;
+    dragPointerId = e.pointerId;
+    try { hit.setPointerCapture(e.pointerId); } catch (ex) { dragActive = false; return; }
+    hit.addEventListener("pointermove", dragMove);
+    hit.addEventListener("pointerup", dragUp);
+    hit.addEventListener("pointercancel", dragCancel);
+    hit.addEventListener("lostpointercapture", dragLost);
+  }
+
   hit.addEventListener("pointerdown", function (e) {
     if (e.button === 2) return;
     closeMenu();
+    // win32：按下进入跟踪，释放点决定 poke/拖动；睡着照旧唤醒不跟踪；非 win32 原行为不变
+    if (dragEnabled && !S.sleeping) return startDrag(e);
     if (S.sleeping) return wake();
     poke();
   });
@@ -510,7 +595,7 @@ contextBridge.exposeInMainWorld("fishIpc", {
     if (typeof cmd !== "string" || !/^[a-zA-Z]+$/.test(cmd)) return; // cmd 白名单含大写（todoAdd/murmurGate）；语义由 main 逐 cmd 校验
     if (value !== undefined) {
       if (typeof value === "string") {
-        if (value.length > 200 || /[\x00-\x1f]/.test(value)) return;
+        if (value.length > 200 || /[\x00-\x1f]/.test(value)) return; // 只拦控制字符/超长：中文 asset 名合法；drag 等格式由 main 逐 cmd 严格校验
       } else if (typeof value === "boolean") {
         /* ok */
       } else if (typeof value === "number") {
@@ -525,7 +610,7 @@ contextBridge.exposeInMainWorld("fishIpc", {
 // 组装 overlay HTML：即时子集（idle/turn/sleep/clicks/work/whisper/balance/cueMap）嵌数据块，
 // 完整包剩余素材由 main 经 fish-pet:asset 预热推送（页内缓存，roll 未命中时也会按需请求）。
 // 纯函数：离线测试用同一入口生成同一份 HTML。
-function composeOverlayHtml(assets, pools, clickSound, initialLang, initialWidth) {
+function composeOverlayHtml(assets, pools, clickSound, initialLang, initialWidth, initialDrag) {
   const need = [];
   const add = (name) => {
     if (typeof name === "string" && name && assets[name] && !need.includes(name)) need.push(name);
@@ -558,6 +643,7 @@ function composeOverlayHtml(assets, pools, clickSound, initialLang, initialWidth
     langs: ["zh", "en", "ja"],
     langNames: FISH_OVERLAY_LANG_NAMES,
     width: typeof initialWidth === "number" ? initialWidth : 200,
+    drag: initialDrag === true,
   };
   const json = JSON.stringify(data).replace(/<\//g, "<\\/");
   return {

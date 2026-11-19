@@ -685,7 +685,8 @@ function fishOverlayMain(ctx) {
     try {
       overlayDir = nodefs.mkdtempSync(nodepath.join(nodeos.tmpdir(), "fish-pet-overlay-"));
       const initialWidth = st && typeof st.width === "number" ? st.width : 200;
-      const composed = composeOverlayHtml(ASSETS, POOLS, CLICK_SOUND, slang(), initialWidth);
+      const initialDrag = process.platform === "win32"; // 仅 win32 用页内拖动；Linux/Wayland 走 WM
+      const composed = composeOverlayHtml(ASSETS, POOLS, CLICK_SOUND, slang(), initialWidth, initialDrag);
       nodefs.writeFileSync(nodepath.join(overlayDir, "index.html"), composed.html);
       nodefs.writeFileSync(nodepath.join(overlayDir, "preload.js"), FISH_OVERLAY_PRELOAD_JS);
       log("info", "overlay files ready", { clips: composed.clips.length, htmlBytes: composed.html.length });
@@ -1124,6 +1125,21 @@ function fishOverlayMain(ctx) {
           } catch (cause) {
             log("warn", "quit destroy failed", { error: String(cause) });
           }
+        } else if (cmd === "drag") {
+          // win32 拖动：页面 pointer capture 跟踪，位移量 "dx,dy" 字符串。main 严格格式校验后 setPosition。
+          // 非 win32 或 win destroyed 忽略；格式先行（Number("")===0 会放过 ","）；范围 ±10000 防越界。
+          if (process.platform !== "win32" || !win || win.isDestroyed()) return;
+          const v = data && typeof data.value === "string" ? data.value : "";
+          if (!/^-?\d+,-?\d+$/.test(v)) return;
+          const dx = Number(v.split(",")[0]);
+          const dy = Number(v.split(",")[1]);
+          if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.abs(dx) > 10000 || Math.abs(dy) > 10000) return;
+          try {
+            const [x, y] = win.getPosition();
+            win.setPosition(x + dx, y + dy);
+          } catch {}
+        } else if (cmd === "dragEnd") {
+          // 拖动结束：无操作（presence 不变；win32 下 setPosition 已即时生效）
         } else if (cmd === "balance") {
           void runBalance(true);
         }
