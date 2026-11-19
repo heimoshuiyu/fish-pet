@@ -414,6 +414,23 @@ export default {
     )
     const storedName = (await context.storage.get("name").catch(() => undefined)) as { name?: string } | undefined
     let petName: string | null = typeof storedName?.name === "string" && storedName.name.trim() ? storedName.name.trim() : null
+    // 语言单一权威：server 持久化（独立小 key），全端经 state.lang 同步；
+    // 窗口 focus 心跳携带的 lang 仅作 wire 兼容保留，不再每 10s 覆盖权威值
+    const storedLang = (await context.storage.get("lang").catch(() => undefined)) as { lang?: string } | undefined
+    let serverLang: FishLang = typeof storedLang?.lang === "string" && storedLang.lang in L10N ? (storedLang.lang as FishLang) : "en"
+    // 共享偏好的 server 权威（窗口/overlay 全端一致）：whisper 默认开、notify 默认关、width 默认 200（合法域 120–360）。
+    // 唯一写入点是 settings 方法（显式、持久化、经 state 同步）；focus 心跳带的 whisper 只作 wire 兼容，不再覆盖权威。
+    const storedSettings = (await context.storage.get("settings").catch(() => undefined)) as
+      | { whisper?: unknown; notify?: unknown; width?: unknown }
+      | undefined
+    const settings = {
+      whisper: storedSettings?.whisper !== false,
+      notify: storedSettings?.notify === true,
+      width:
+        typeof storedSettings?.width === "number" && Number.isFinite(storedSettings.width)
+          ? Math.min(360, Math.max(120, Math.round(storedSettings.width)))
+          : 200,
+    }
     let envFacts: EnvFacts | null = null
     // ---------- 后台完成气泡队列（≤3 合并；全量庆祝走 flash 不进这里）----------
     let notice: { text: string; sid: string | null; ok: boolean; at: number } | null = null
@@ -449,9 +466,12 @@ export default {
     let whisperCount = 0
     const doneDedup = new Map<string, number>()
     const reportedAt = new Map<string, number>()
-    let focus: { sessionID: string | null; digest: string; sleeping: boolean; lang: string; whisper: boolean; at: number } | null = null
+    let focus: { sessionID: string | null; digest: string; sleeping: boolean; lang: string; at: number } | null = null
+    // 桌外 overlay 的观众心跳：只表达「桌外身体仍可见 + 它的睡眠态」，绝不覆盖 focus 的 sessionID/digest/running/lang。
+    // 新鲜判定与 focus 同一个 AUDIENCE_TTL：presence 停止上报后自然过期。
+    let presence: { sleeping: boolean; at: number } | null = null
     // 语言（独立开关，随 focus 心跳到达）：影响碎碎念/对话提示词、完成气泡后缀、会话标题
-    const slang = (): FishLang => (focus && focus.lang in L10N ? (focus.lang as FishLang) : "en")
+    const slang = (): FishLang => (serverLang in L10N ? serverLang : "en")
 
     const nowMs = () => performance.now()
 
@@ -462,9 +482,16 @@ export default {
       flashAt: atomic ? atomic.start : null,
       sessionID: fishSessionID ?? null,
       name: petName,
+      lang: slang(), // 语言权威：全端（窗口/main/overlay）从 state 同步
+      // 共享偏好权威：全端从 state 同步消费（GUI/overlay 的本轮消费改造由后续任务接入）
+      whisper: settings.whisper,
+      notify: settings.notify,
+      width: settings.width,
       tool: toolLine(),
       notice,
       sessions: runningSessionTiers(),
+      // 待办安全投影：只含用户录入文本与截止（createdAt/lastRemindedAt 留在 server 内部）
+      todos: todos.map((t) => ({ text: t.text, dueAt: t.dueAt })),
     })
     function runningSessionTiers() {
       const now = nowMs()
@@ -484,6 +511,195 @@ export default {
     }
     let lastEmit = ""
 
+    // ---------- 余额：DeepSeek 官方 + custom 中转（server 侧查询，30 分钟内存缓存 + in-flight 去重）----------
+    // DeepSeek 凭据顺序：显式 options.balance.deepseek.apiKey → 凭据库 active 连接（仅 credential/key 型）→
+    // providers.deepseek.settings.apiKey。只在缺失时下探；选定后 401/失败绝不换源。
+    // 自动来源受 baseURL 护栏：deepseek provider 指向非官方自定义 baseURL（中转）时不启用，
+    // 避免把中转 key 发去官方余额端点——此时要求显式 balance 配置或 custom 条目。
+    // 任何 key/Authorization 不进日志、RPC 输出或 storage；RPC 只回精简错误码。
+    const BALANCE_TTL_MS = 30 * 60 * 1000
+    const BALANCE_TIMEOUT_MS = 15_000
+    const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+    const DEEPSEEK_OFFICIAL_ORIGIN = "https://api.deepseek.com"
+    type BalanceError = "unauthorized" | "timeout" | "upstream"
+    type BalanceEntry =
+      | { name: string; remaining: number; total: number; error: null }
+      | { name: string; remaining: null; total: null; error: BalanceError }
+    interface BalanceSnapshot {
+      at: number
+      results: BalanceEntry[]
+    }
+    interface BalanceOptions {
+      deepseek?: { apiKey?: unknown; total?: unknown }
+      custom?: Array<{ name?: unknown; url?: unknown; headers?: unknown; path?: unknown; total?: unknown }> | unknown
+    }
+    const balanceOptions = (): BalanceOptions => {
+      const balance = (context.options as { balance?: unknown } | undefined)?.balance
+      return typeof balance === "object" && balance !== null ? (balance as BalanceOptions) : {}
+    }
+    const officialDeepSeek = (baseURL: unknown) => {
+      if (typeof baseURL !== "string" || !baseURL) return true // 未配置 baseURL = 官方默认，允许自动来源
+      try {
+        return new URL(baseURL).origin === DEEPSEEK_OFFICIAL_ORIGIN
+      } catch {
+        return false
+      }
+    }
+    const dig = (value: unknown, path: string) =>
+      path
+        .split(".")
+        .reduce<unknown>((acc, key) => (acc === null || acc === undefined || typeof acc !== "object" ? undefined : (acc as Record<string, unknown>)[key]), value)
+    // 统一请求核：15s 超时；401/403 → unauthorized；非 ok/坏 JSON/形状不符 → upstream；超时中断 → timeout
+    const fetchBalance = async (input: {
+      url: string
+      headers: Record<string, string>
+      read: (body: unknown) => number | undefined
+    }): Promise<{ remaining: number; error: null } | { remaining: null; error: BalanceError }> => {
+      const signal = AbortSignal.timeout(BALANCE_TIMEOUT_MS)
+      try {
+        const res = await fetch(input.url, { headers: input.headers, signal })
+        if (res.status === 401 || res.status === 403) return { remaining: null, error: "unauthorized" }
+        if (!res.ok) return { remaining: null, error: "upstream" }
+        const body: unknown = await res.json().catch(() => null)
+        const remaining = input.read(body)
+        if (remaining === undefined || !Number.isFinite(remaining)) return { remaining: null, error: "upstream" }
+        return { remaining, error: null }
+      } catch {
+        return signal.aborted ? { remaining: null, error: "timeout" } : { remaining: null, error: "upstream" }
+      }
+    }
+    const providerSettings = async (): Promise<Record<string, unknown> | undefined> => {
+      try {
+        const out = await context.provider.get({ providerID: "deepseek" })
+        const settings = (out as { data?: { settings?: unknown } } | undefined)?.data?.settings
+        return typeof settings === "object" && settings !== null ? (settings as Record<string, unknown>) : undefined
+      } catch (cause) {
+        // 区分「provider 不存在」与「读取失败」：不存在 = 官方默认，允许自动来源（零配置 DB 路径）；
+        // 读取失败 = fail closed，绝不据此把任何 key 发往官方。宿主对未注册 provider 抛
+        // "Provider not found: …"（core/src/plugin/host.ts 的 provider.get 实现）；未来宿主若改措辞，
+        // 匹配不中会落到 error 一侧——只会更保守，不会 fail open。
+        if (cause instanceof Error && /^Provider not found:/.test(cause.message)) return undefined
+        throw cause
+      }
+    }
+    // 显式 options key（override）：总是允许，直连官方余额端点
+    const explicitDeepSeek = (): { key: string; total: number | null } | undefined => {
+      const conf = balanceOptions().deepseek
+      if (typeof conf?.apiKey !== "string" || !conf.apiKey) return undefined
+      return { key: conf.apiKey, total: typeof conf.total === "number" && Number.isFinite(conf.total) ? conf.total : null }
+    }
+    // 自动 DeepSeek 来源，四态：
+    // key         选定 credential/key 连接：用它发官方，失败（含 401）也绝不换源；
+    // unavailable 确认没有可用 key 连接（无连接 / 非 key 型）：只有这时才允许 provider 配置兜底；
+    // error       查询或解析异常（provider 读取失败、active/resolve 抛错、key 连接解不出可用 key）：
+    //             fail closed——不启用任何自动来源、不发任何 key，手动查询回明确 upstream 结果，自动静默；
+    // blocked     provider 指向非官方 baseURL（中转）：自动来源整体停用（护栏语义不变，custom 照常）。
+    type AutoDeepSeek =
+      | { status: "key"; key: string }
+      | { status: "unavailable"; settings: Record<string, unknown> | undefined }
+      | { status: "error" }
+      | { status: "blocked" }
+    const autoDeepSeek = async (): Promise<AutoDeepSeek> => {
+      let settings: Record<string, unknown> | undefined
+      try {
+        settings = await providerSettings()
+      } catch {
+        return { status: "error" }
+      }
+      if (!officialDeepSeek(settings?.baseURL)) return { status: "blocked" }
+      let connection: unknown
+      try {
+        connection = await context.integration.connection.active("deepseek")
+      } catch {
+        // 无法确认是否存在 key 连接：不得当作"缺失"而启用配置兜底（可能换到另一账号的 key）
+        return { status: "error" }
+      }
+      const info = connection as { type?: unknown; method?: unknown } | undefined
+      if (!connection || info?.type !== "credential" || info?.method !== "key")
+        return { status: "unavailable", settings } // 无连接或非 key 型（oauth/external/env）：不适用自动 key 来源
+      let value: unknown
+      try {
+        value = await context.integration.connection.resolve(connection)
+      } catch {
+        return { status: "error" } // 选定的连接解析失败：不静默改用 provider 配置的 key
+      }
+      const key = (value as { type?: unknown; key?: unknown } | undefined)?.type === "key" ? (value as { key?: unknown }).key : undefined
+      if (typeof key !== "string" || !key) return { status: "error" } // 声明 key 型却解析不出可用 key：同上 fail closed
+      return { status: "key", key }
+    }
+    let balanceCache: BalanceSnapshot | null = null
+    let balanceInFlight: Promise<BalanceSnapshot> | undefined
+    const collectBalance = async (force: boolean): Promise<BalanceSnapshot> => {
+      if (!force && balanceCache && Date.now() - balanceCache.at < BALANCE_TTL_MS) return balanceCache
+      const run = (balanceInFlight ??= (async (): Promise<BalanceSnapshot> => {
+        const options = balanceOptions()
+        const sources: Array<{ name: string; total: number; run: () => Promise<{ remaining: number; error: null } | { remaining: null; error: BalanceError }> }> = []
+        const explicit = explicitDeepSeek()
+        if (explicit) {
+          sources.push({
+            name: "DeepSeek",
+            total: explicit.total ?? 50,
+            run: () => fetchBalance({ url: DEEPSEEK_BALANCE_URL, headers: { Authorization: `Bearer ${explicit.key}` }, read: (body) => { const n = Number(dig(body, "balance_infos.0.total_balance")); return Number.isFinite(n) ? n : undefined } }),
+          })
+        } else {
+          const auto = await autoDeepSeek()
+          if (auto.status === "key") {
+            sources.push({
+              name: "DeepSeek",
+              total: 50,
+              run: () => fetchBalance({ url: DEEPSEEK_BALANCE_URL, headers: { Authorization: `Bearer ${auto.key}` }, read: (body) => { const n = Number(dig(body, "balance_infos.0.total_balance")); return Number.isFinite(n) ? n : undefined } }),
+            })
+          } else if (auto.status === "error") {
+            // 查询/解析异常：手动可见的明确失败（前端「查询失败」），自动静默；不发起任何 key 请求
+            sources.push({
+              name: "DeepSeek",
+              total: 50,
+              run: async () => ({ remaining: null, error: "upstream" as const }),
+            })
+          } else if (auto.status === "unavailable") {
+            // 确认无可用 key 连接后的配置兜底：这是唯一允许 config key 的路径
+            const apiKey = auto.settings?.apiKey
+            if (typeof apiKey === "string" && apiKey) {
+              sources.push({
+                name: "DeepSeek",
+                total: 50,
+                run: () => fetchBalance({ url: DEEPSEEK_BALANCE_URL, headers: { Authorization: `Bearer ${apiKey}` }, read: (body) => { const n = Number(dig(body, "balance_infos.0.total_balance")); return Number.isFinite(n) ? n : undefined } }),
+              })
+            }
+          }
+          // blocked（provider 指向中转）：无 DeepSeek 来源，custom 照常
+        }
+        const customs = Array.isArray(options.custom) ? options.custom : []
+        for (const entry of customs) {
+          if (!entry || typeof entry.url !== "string" || !entry.url) continue
+          const headers = typeof entry.headers === "object" && entry.headers !== null ? (entry.headers as Record<string, string>) : {}
+          const path = typeof entry.path === "string" ? entry.path : ""
+          sources.push({
+            name: typeof entry.name === "string" && entry.name ? entry.name : "",
+            total: typeof entry.total === "number" && Number.isFinite(entry.total) ? entry.total : 100,
+            run: () => fetchBalance({ url: entry.url as string, headers, read: (body) => { const n = Number(dig(body, path)); return Number.isFinite(n) ? n : undefined } }),
+          })
+        }
+        if (sources.length === 0) return { at: 0, results: [] }
+        const results = await Promise.all(
+          sources.map(async (source) => {
+            const outcome = await source.run()
+            return outcome.error
+              ? { name: source.name, remaining: null, total: null, error: outcome.error }
+              : { name: source.name, remaining: outcome.remaining, total: source.total, error: null }
+          }),
+        )
+        return { at: Date.now(), results }
+      })())
+      try {
+        const snapshot = await run
+        if (snapshot.results.length > 0) balanceCache = snapshot
+        return snapshot
+      } finally {
+        if (balanceInFlight === run) balanceInFlight = undefined
+      }
+    }
+
     const registration = await context.rpc.register(FishState, {
       state: async () => snapshot(),
       focus: async (input) => {
@@ -494,8 +710,8 @@ export default {
           sessionID: selfFocus ? null : (input.sessionID ?? null),
           digest: selfFocus ? "" : String(input.digest ?? "").slice(0, 2000),
           sleeping: !!input.sleeping,
+          // wire 兼容保留：lang/whisper 不再作为权威来源（语言走 language 方法，碎碎念总开关走 settings 方法）
           lang: typeof input.lang === "string" ? input.lang : "en",
-          whisper: input.whisper !== false,
           at: Date.now(),
         }
         // 对账：前端看得见全部运行中会话；补上插件加载前已开始的，并记最近上报时间供 tick 清鬼
@@ -551,6 +767,46 @@ export default {
         petName = n || null
         await context.storage.set("name", { name: petName ?? "" }).catch(() => {})
         emit()
+        return snapshot()
+      },
+      balance: async (input) => {
+        // force 手动绕过缓存；无配置时返回空 results（前端按"未配置"处理），不发任何上游请求
+        try {
+          return await collectBalance(input.force === true)
+        } catch {
+          return { at: 0, results: [] }
+        }
+      },
+      language: async (input) => {
+        // 语言单一权威的显式入口：合法 zh/en/ja 才落库并生效；非法值静默忽略（返回当前快照）
+        const l = String((input as { lang?: unknown }).lang ?? "")
+        if (l === "zh" || l === "en" || l === "ja") {
+          serverLang = l as FishLang
+          await context.storage.set("lang", { lang: serverLang }).catch(() => {})
+        }
+        emit()
+        return snapshot()
+      },
+      settings: async (input) => {
+        // 共享偏好的唯一权威写入点。非法拒绝（原子）：任一字段类型/width 越界，或三项全缺，整体不应用；
+        // schema 是第一道（至少一项 + 范围），此处同规则双保险。合法时落库并经 state 事件广播。
+        const invalid =
+          (input.whisper !== undefined && typeof input.whisper !== "boolean") ||
+          (input.notify !== undefined && typeof input.notify !== "boolean") ||
+          (input.width !== undefined &&
+            (typeof input.width !== "number" || !Number.isFinite(input.width) || input.width < 120 || input.width > 360)) ||
+          (input.whisper === undefined && input.notify === undefined && input.width === undefined)
+        if (invalid) return snapshot()
+        if (typeof input.whisper === "boolean") settings.whisper = input.whisper
+        if (typeof input.notify === "boolean") settings.notify = input.notify
+        if (typeof input.width === "number") settings.width = Math.min(360, Math.max(120, Math.round(input.width)))
+        await context.storage.set("settings", { ...settings }).catch(() => {})
+        emit()
+        return snapshot()
+      },
+      presence: async (input) => {
+        // overlay 观众心跳：只刷新桌外身体的在场时间与睡眠态；focus 的会话/摘要/运行/语言一律不动
+        presence = { sleeping: input.sleeping === true, at: Date.now() }
         return snapshot()
       },
       resetBrain: async () => {
@@ -837,15 +1093,25 @@ export default {
       }
     }
 
+    // 观众与睡眠来源：presence 新鲜时以桌外 overlay 的睡眠态为准（防止 Web 窗口每 10s 的 awake 心跳抢走 overlay 睡眠）；
+    // presence 过期后回退窗口 focus.sleeping。返回 null = 窗口与桌外都无新鲜观众。
+    const audienceState = () => {
+      const now = Date.now()
+      if (presence && now - presence.at <= T.AUDIENCE_TTL) return { sleeping: presence.sleeping }
+      if (focus && now - focus.at <= T.AUDIENCE_TTL) return { sleeping: !!focus.sleeping }
+      return null
+    }
+
     async function runWhisper(opts: { dream: boolean; manual?: boolean }) {
       if (!opts.manual) {
-        // 定时碎碎念需要观众：最近 AUDIENCE_TTL 内有前端心跳才开口
-        if (!focus || Date.now() - focus.at > T.AUDIENCE_TTL) return
+        // 定时碎碎念需要观众：最近 AUDIENCE_TTL 内有窗口心跳或桌外 overlay presence 任一新鲜才开口
+        if (!audienceState()) return
       }
       const sid = await ensureFishSession()
       if (!sid) return
       const gen = brainGen // 重置栅栏：resetBrain 之后的在途失败不再重建
-      const digest = opts.dream || !focus ? "" : focus.digest
+      // presence-only 观众时 focus 可能已陈旧：摘要只取新鲜 focus，过期则无情境碎碎念（提示词本就允许为空）
+      const digest = opts.dream || !focus || Date.now() - focus.at > T.AUDIENCE_TTL ? "" : focus.digest
       const L = L10N[slang()]
       const S = S10N[slang()]
       const head = [L.persona, petName ? S.nameLine(petName) : ""].filter(Boolean).join("\n")
@@ -866,11 +1132,11 @@ export default {
     const whisperTimer = setInterval(() => {
       if (controller.signal.aborted) return
       whisperCount++
-      const audience = !!focus && Date.now() - focus.at <= T.AUDIENCE_TTL
+      const audience = audienceState()
       if (!audience) return
-      if (focus?.whisper === false) return // 碎碎念总开关：关了就静默（含梦话；菜单手动触发不受影响）
-      if (focus?.sleeping && whisperCount % 2 === 1) return // 全睡时隔拍说梦话
-      void runWhisper({ dream: !!focus?.sleeping })
+      if (!settings.whisper) return // 碎碎念总开关：Server 权威（settings.whisper），不再被窗口心跳携带的 whisper 抢占；菜单手动触发不受影响
+      if (audience.sleeping && whisperCount % 2 === 1) return // 全睡时隔拍说梦话（桌外身体的睡眠态优先）
+      void runWhisper({ dream: audience.sleeping })
     }, T.WHISPER_EVERY)
 
     // ---------- 环境事实（免 key：ipwho.is + Open-Meteo；只喂碎碎念/对话提示词，不再作为独立功能）----------

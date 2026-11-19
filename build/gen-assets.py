@@ -39,7 +39,7 @@ sound = base64.b64encode(open(os.path.join(SRC, "click-duck.wav"), "rb").read())
 with open(OUT, "w", encoding="utf-8") as f:
     f.write('"use strict";\n')
     f.write("// fish-pet —— 窗口内大肥鱼桌宠（port 自 dsh-pet；素材源自 dsh-pet，禁止商用；公开分发须署名 https://github.com/PC2005-cloud/dsh-pet，详见 LICENSE）\n")
-    f.write("// 形态：GUI-only 渲染器插件（Style + Slot window.bottom + 裸 DOM 兜底），无 main 导出、不声明 os\n")
+    f.write("// 形态：GUI 双入口渲染器（窗口内 setup + Electron main 桌外 overlay），无 os 声明（保 Web 兼容）\n")
     f.write(f"// 资产：{len(clips)} 段 480x270 VP9-alpha WebM 重编码（libvpx 解码保 alpha，CRF 42）；动画池配置见 build/pools.json\n\n")
     f.write("const ASSETS = {\n" + ",\n".join(parts) + "\n};\n\n")
     f.write(f"const POOLS = {json.dumps(pools, ensure_ascii=False, separators=(',', ':'))};\n\n")

@@ -4,7 +4,7 @@
 // 通道事实（均已核对源码）：session.prompt/create 走 data 解包；message.list {data,cursor} 带 order:desc；
 // attention.notify 点击固定打开 session；Contract id 必须是本插件 id。
 
-const { Plugin, Style, Slot, Panel, Store, Contract } = require("@opencode/plugin/gui");
+const { Plugin, Style, Slot, Panel, Store, Contract, Ipc } = require("@opencode/plugin/gui");
 
 let Schema = undefined;
 try {
@@ -26,6 +26,8 @@ const CSS = `
 .fish-menu{position:fixed;z-index:40;min-width:132px;padding:4px;border-radius:10px;pointer-events:auto;font-size:13px;background:var(--v2-background-bg-layer-02,#2c2c2c);box-shadow:0 8px 28px rgb(0 0 0 / .35)}
 .fish-menu button{display:block;width:100%;padding:7px 12px;border:0;border-radius:7px;background:none;color:var(--v2-text-text-base,#e8e8e8);text-align:left;cursor:pointer;font:inherit}
 .fish-menu button:hover{background:var(--v2-background-bg-layer-03,#3c3c3c)}
+.fish-menu-row{padding:6px 12px;color:var(--v2-text-text-muted,#9a9a9a);font-size:12px;line-height:1.4;white-space:pre-wrap;word-break:break-all}
+.fish-menu-row .due{opacity:.8;margin-left:6px}
 .fish-chat{display:flex;flex-direction:column;height:100%;min-height:0}
 .fish-chat-list{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
 .fish-row{max-width:86%;padding:8px 12px;border-radius:12px;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
@@ -58,15 +60,15 @@ const STR = {
       chat: "开聊", todo: "记一笔待办", balance: "查余额", murmur: "碎碎念一句", nameFish: "起个名字",
       resetBrain: "重置鱼脑", notifyOn: "开完成通知", notifyOff: "关完成通知",
       whisperOn: "开碎碎念", whisperOff: "关碎碎念",
-      bigger: "大一点", smaller: "小一点", home: "回原位", lang: "语言", back: "返回",
+      bigger: "大一点", smaller: "小一点", home: "回原位", lang: "语言", todoList: "待办列表", back: "返回",
     },
     bubbles: {
-      chatFallback: "聊天面板在会话侧栏里～", resetDone: "脑清空啦，下次开口重新开始～",
+      chatFallback: "聊天面板在会话侧栏里～", resetDone: "脑清空啦，下次开口重新开始～", resetFailed: "没清成…（稍后再试试）",
       notifyOn: "好，我盯着～", notifyOff: "好，不吵你～",
       sendFailed: "发送失败了…（右键鱼「重置鱼脑」再试）", notReady: "面板还没就绪，稍等一下…",
       replyError: "模型出岔子了…（右键「重置鱼脑」或在会话里换模型）", replyErrorShort: "模型出岔子了…",
-      balanceNoKey: "还没给我配余额钥匙～", whisperOn: "好，我会偶尔唠叨～", whisperOff: "好，安静待着～", nameSet: (n) => `以后就叫「${n}」啦～`, maxFish: "最多六只啦！",
-      todoDone: "记下啦：",
+      balanceNoKey: "还没给我配余额钥匙～", balanceInvalid: "余额钥匙失效了…（重新配一下？）", balanceFailed: "余额没查到…（网络或上游出岔子）", whisperOn: "好，我会偶尔唠叨～", whisperOff: "好，安静待着～", nameSet: (n) => `以后就叫「${n}」啦～`, nameFailed: "名字没存上…（再试一次？）", maxFish: "最多六只啦！",
+      todoDone: "记下啦：", todoCleared: "待办清空啦～", actionFailed: "没存上…（稍后再试试）", langSwitched: "好，说中文～",
     },
     panel: {
       placeholder: "跟鱼说点什么…", send: "发送", emptyNever: "还没开过口～右键鱼「开聊」或直接发消息",
@@ -76,7 +78,7 @@ const STR = {
     balanceLabels: ["满溢", "叮当", "如常", "皱眉", "告急", "空了"],
     balanceReport: (n) => `DeepSeek 剩 ${n} 元`, balanceCustom: (name, n) => `${name} 剩 ${n}`,
     customName: "自定义", withLabel: (r, l) => `${r}（${l}）`,
-    todo: { title: "记一笔待办", placeholder: "要记的事…（可加 @2026-11-20 15:00 / @2h）" },
+    todo: { title: "记一笔待办", placeholder: "要记的事…（可加 @2026-11-20 15:00 / @2h）", clear: "清空待办", empty: "还没有待办～" },
   },
   en: {
     status: { thinking: "Busy…", working: "Working…", result: "Wrapping up…", waiting: "Waiting…", success: "Done!", error: "Oops…" },
@@ -86,15 +88,15 @@ const STR = {
       chat: "Let's chat", todo: "Add a to-do", balance: "Check balance", murmur: "Say something", nameFish: "Name the fish",
       resetBrain: "Reset brain", notifyOn: "Turn notifications on", notifyOff: "Turn notifications off",
       whisperOn: "Turn muttering on", whisperOff: "Turn muttering off",
-      bigger: "Bigger", smaller: "Smaller", home: "Back to spot", lang: "Language", back: "Back",
+      bigger: "Bigger", smaller: "Smaller", home: "Back to spot", lang: "Language", todoList: "To-do list", back: "Back",
     },
     bubbles: {
-      chatFallback: "The chat panel lives in the session sidebar~", resetDone: "Brain wiped — fresh start next time~",
+      chatFallback: "The chat panel lives in the session sidebar~", resetDone: "Brain wiped — fresh start next time~", resetFailed: "Couldn't reset… (try again in a bit)",
       notifyOn: "Okay, I'll keep watch~", notifyOff: "Okay, I'll stay quiet~",
       sendFailed: "Couldn't send… (right-click → Reset brain and retry)", notReady: "Panel not ready yet, one sec…",
       replyError: "Model hiccup… (right-click → Reset brain, or switch model in the session)", replyErrorShort: "Model hiccup…",
-      balanceNoKey: "No balance key configured yet~", whisperOn: "Okay, I'll chatter now and then~", whisperOff: "Okay, staying quiet~", nameSet: (n) => `"${n}" it is~`, maxFish: "Six fish max!",
-      todoDone: "Noted: ",
+      balanceNoKey: "No balance key configured yet~", balanceInvalid: "The balance key stopped working… (reconfigure it?)", balanceFailed: "Couldn't check the balance… (network or upstream hiccup)", whisperOn: "Okay, I'll chatter now and then~", whisperOff: "Okay, staying quiet~", nameSet: (n) => `"${n}" it is~`, nameFailed: "Couldn't save the name… (try again?)", maxFish: "Six fish max!",
+      todoDone: "Noted: ", todoCleared: "To-dos cleared~", actionFailed: "Didn't go through… (try again in a bit)", langSwitched: "Okay, English it is~",
     },
     panel: {
       placeholder: "Say something to the fish…", send: "Send", emptyNever: "Haven't spoken yet~ right-click the fish → Let's chat, or just type",
@@ -104,7 +106,7 @@ const STR = {
     balanceLabels: ["Full", "Jingling", "Fine", "Frowning", "Low", "Empty"],
     balanceReport: (n) => `DeepSeek ¥${n} left`, balanceCustom: (name, n) => `${name}: ${n} left`,
     customName: "custom", withLabel: (r, l) => `${r} (${l})`,
-    todo: { title: "Add a to-do", placeholder: "What to remember… (optional @2026-11-20 15:00 / @2h)" },
+    todo: { title: "Add a to-do", placeholder: "What to remember… (optional @2026-11-20 15:00 / @2h)", clear: "Clear to-dos", empty: "Nothing on the list yet~" },
   },
   ja: {
     status: { thinking: "考え中…", working: "お仕事中…", result: "まとめ中…", waiting: "待ってるよ…", success: "できた！", error: "うう…エラー" },
@@ -114,15 +116,15 @@ const STR = {
       chat: "おしゃべり", todo: "todoを追加", balance: "残高チェック", murmur: "ひとこと", nameFish: "名前をつける",
       resetBrain: "脳をリセット", notifyOn: "通知をつける", notifyOff: "通知をけす",
       whisperOn: "ひとことオン", whisperOff: "ひとことオフ",
-      bigger: "大きく", smaller: "小さく", home: "元の場所へ", lang: "言語", back: "戻る",
+      bigger: "大きく", smaller: "小さく", home: "元の場所へ", lang: "言語", todoList: "todoリスト", back: "戻る",
     },
     bubbles: {
-      chatFallback: "チャットパネルはセッションのサイドバーにあるよ〜", resetDone: "脳を空にしたよ〜次は最初から〜",
+      chatFallback: "チャットパネルはセッションのサイドバーにあるよ〜", resetDone: "脳を空にしたよ〜次は最初から〜", resetFailed: "リセットできなかった…（また後で）",
       notifyOn: "うん、見てるよ〜", notifyOff: "うん、静かにするね〜",
       sendFailed: "送信できなかった…（右クリック→脳をリセットしてもう一回）", notReady: "パネルの準備中…ちょっと待ってね…",
       replyError: "モデルがミスしたみたい…（右クリック→脳をリセット、またはセッションでモデル変更）", replyErrorShort: "モデルがミスしたみたい…",
-      balanceNoKey: "残高の鍵がまだ設定されてないよ〜", whisperOn: "うん、たまに喋るね〜", whisperOff: "うん、静かにしてるね〜", nameSet: (n) => `「${n}」だね〜`, maxFish: "最大6匹だよ！",
-      todoDone: "メモした：",
+      balanceNoKey: "残高の鍵がまだ設定されてないよ〜", balanceInvalid: "残高の鍵が使えなくなってる…（設定し直す？）", balanceFailed: "残高を確認できなかった…（ネットワークか上流の問題）", whisperOn: "うん、たまに喋るね〜", whisperOff: "うん、静かにしてるね〜", nameSet: (n) => `「${n}」だね〜`, nameFailed: "名前を保存できなかった…（もう一度？）", maxFish: "最大6匹だよ！",
+      todoDone: "メモした：", todoCleared: "todoを空にしたよ〜", actionFailed: "保存できなかった…（また後で）", langSwitched: "うん、日本語で〜",
     },
     panel: {
       placeholder: "魚にお話しかけてみて…", send: "送信", emptyNever: "まだお話ししてないよ〜魚を右クリック→おしゃべり、またはそのまま入力してね",
@@ -132,7 +134,7 @@ const STR = {
     balanceLabels: ["満杯", "チャリン", "いつも", "心配", "やばい", "空っぽ"],
     balanceReport: (n) => `DeepSeek 残り ¥${n}`, balanceCustom: (name, n) => `${name}: 残り ${n}`,
     customName: "カスタム", withLabel: (r, l) => `${r}（${l}）`,
-    todo: { title: "todoを追加", placeholder: "覚えておくこと…（@2026-11-20 15:00 / @2h 可）" },
+    todo: { title: "todoを追加", placeholder: "覚えておくこと…（@2026-11-20 15:00 / @2h 可）", clear: "todoを全消し", empty: "todoはまだないよ〜" },
   },
 };
 // 动画池（gen-assets.py 从 pools.json 注入 head.js；加减动画只改配置文件）
@@ -159,13 +161,60 @@ const FishStateDef = {
     focus: { input: { type: "object", additionalProperties: false } },
     whisper: { input: { type: "object", additionalProperties: false } },
     say: { input: { type: "object", additionalProperties: false } },
+    name: { input: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false } },
     todoAdd: { input: { type: "object", additionalProperties: false } },
     todoClear: { input: { type: "object", additionalProperties: false } },
     weather: { input: { type: "object", additionalProperties: false } },
+    balance: { input: { type: "object", properties: { force: { type: "boolean" } }, required: ["force"], additionalProperties: false } },
+    language: { input: { type: "object", properties: { lang: { enum: ["zh", "en", "ja"] } }, required: ["lang"], additionalProperties: false } },
+    settings: { input: { type: "object", additionalProperties: false } },
+    presence: { input: { type: "object", properties: { sleeping: { type: "boolean" } }, required: ["sleeping"], additionalProperties: false } },
     resetBrain: { input: { type: "object", additionalProperties: false } },
   },
   events: { state: { schema: { type: "object" } } },
 };
+
+// ---------- 桌外 overlay 的 main↔窗口 IPC 契约（id 必须在本插件 id 之下）----------
+// mode 三态：off=窗口内鱼（默认/回退）；pending=overlay 启动中（窗口先别挂鱼）；active=桌外鱼已就绪。
+// main → 窗口：state 推送（mode + 桌外睡眠态）+ active 事件 + chat 事件（开聊定向到聚焦窗口）。
+// 窗口 → main：mode()（非 reactive 初读）、setLang（兼容入口）、report（窗口鱼挂载状态）、
+// contract（窗口 Contract 的 say/play 在 overlay active 时转发到桌外身体）。
+// Schema 缺席（旧宿主）或 Ipc 缺席时整个 overlay 特性不启用：main 不 provide → 窗口 ctx.main 调用
+// reject → setup 兜底挂窗口内鱼，行为与旧版完全一致。
+const FishOverlayMode = () =>
+  Schema && Ipc
+    ? Ipc.define({
+        id: "fish-pet.overlay",
+        state: Schema.Struct({ mode: Schema.String, sleeping: Schema.optional(Schema.Boolean) }),
+        methods: {
+          mode: { output: Schema.Struct({ mode: Schema.String, sleeping: Schema.optional(Schema.Boolean) }) },
+          setLang: { input: Schema.Struct({ lang: Schema.String }) },
+          report: { input: Schema.Struct({ hasFish: Schema.Boolean }) },
+          // 文本录入路由回包：窗口 dialog 完成（ok+text）或取消（ok=false，静默）
+          promptResult: {
+            input: Schema.Struct({
+              kind: Schema.String,
+              text: Schema.optional(Schema.String),
+              ok: Schema.optional(Schema.Boolean),
+            }),
+          },
+          contract: {
+            input: Schema.Struct({
+              kind: Schema.String,
+              text: Schema.optional(Schema.String),
+              name: Schema.optional(Schema.String),
+            }),
+          },
+        },
+        events: {
+          active: Schema.Struct({ mode: Schema.String, sleeping: Schema.optional(Schema.Boolean) }),
+          chat: Schema.Struct({}),
+          // main → 定向窗口：打开宿主 dialog 收文本（todo/name），窗口回 promptResult
+          prompt: Schema.Struct({ kind: Schema.String }),
+        },
+      })
+    : null;
+const FishOverlayDef = FishOverlayMode();
 
 function ensureAlphaFix() {
   if (document.getElementById("fish-alpha-fix")) return null;
@@ -210,6 +259,8 @@ const buildPrefs = () => {
       notify: Schema.optional(Schema.Boolean),
       whisper: Schema.optional(Schema.Boolean),
       lang: Schema.optional(Schema.String),
+      // 一次性迁移标记：本地共享偏好（whisper/notify/width）已上推 server settings 权威
+      settingsMigrated: Schema.optional(Schema.Boolean),
       whisperLease: Schema.optional(Schema.Struct({ holder: Schema.String, until: Schema.Number })),
     });
     return { decl: { prefs: Store.global(Prefs, INITIAL) }, shim: null };
@@ -217,6 +268,985 @@ const buildPrefs = () => {
     return { decl: {}, shim: { ...INITIAL, INITIAL } };
   }
 };
+
+// =========================================================
+// 桌外 overlay main（Electron 主进程，app-scoped 单例；Web 永不运行）
+// - 凭据/RPC 只留在 main：页面只能收到显示状态（tier/flash/notice/碎碎念/余额文案）与素材 data URI
+// - options.overlay 开关：包默认关；失败/超时回退窗口内鱼（mode → off + 事件广播）
+// - 不依赖 Wayland 不可信的 setPosition/getBounds：窗口位置交给 Sway 浮动 con（app-region/Sway 拖拽）
+// =========================================================
+function fishOverlayMain(ctx) {
+  // 旧宿主（无 Ipc/Schema）或宿主未提供 log/windows/provide：直接不做，窗口侧自行兜底
+  if (!FishOverlayDef) return;
+  if (!ctx.provide || !ctx.windows) return;
+  const debug = !!(ctx.options && ctx.options.overlayDebug);
+  const evidenceDir = "/tmp/opencode/fish-pet-overlay-mvp";
+  const evidence = debug ? evidenceDir + "/evidence.jsonl" : null;
+  const log = (level, message, data) => {
+    try {
+      ctx.log.write(level, "fish-pet overlay: " + message, data || {});
+    } catch {
+      /* 旧宿主无 log */
+    }
+    if (evidence) {
+      try {
+        require("node:fs").mkdirSync(evidenceDir, { recursive: true });
+        require("node:fs").appendFileSync(
+          evidence,
+          JSON.stringify(Object.assign({ t: new Date().toISOString(), level, message }, data || {})) + "\n",
+        );
+      } catch {
+        /* 证据失败不影响功能 */
+      }
+    }
+  };
+
+  const enabled = !!(ctx.options && ctx.options.overlay);
+  let mode = enabled ? "pending" : "off";
+  let langPref = "en";
+  let win = null;
+  let loaded = false;
+  let provider = null;
+  let fishSid = null;
+  let st = null; // 最近一次 server state 快照
+  let murmurNow = null;
+  let balanceNow = null;
+  let chatFailNow = null;
+  let contractSayNow = null; // 窗口 Contract.say 转发（overlay active 时）
+  let contractPlayNow = null; // 窗口 Contract.play 转发
+  let nameResultNow = null;
+  let resetResultNow = null;
+  let actionResultNow = null; // 统一真实结果通道：todoAdd/todoClear/notify/whisper/width/prompt
+  let overlaySleeping = false; // 桌外身体的睡眠态：页面 cmd sleep 是唯一来源，presence 上报 server
+  let chatBusy = false; // 鱼会话执行中：execution.started→true / 终态→false，页内 thinking 反馈
+  let cmdHandler = null;
+  let balanceTimer = 0;
+  let watchdogTimer = 0;
+  let heartbeatTimer = 0;
+  let presenceTimer = 0;
+  let busyWatchdogTimer = 0; // chatBusy 看门狗（与窗口版同量级 90s）：丢终态事件也不卡死 thinking
+  let prefetchTimers = [];
+  let execRetryTimer = 0;
+  let execWaitResolve = null;
+  let execStopped = true; // watchExec 启动后翻 false；cleanup 置回 true 终止循环
+  let overlayDir = null;
+  let cleaned = false;
+
+  // 逐次读取 client（官方约定：server 重启后 ctx.client 是新对象，旧 client 调用只会一直拒绝）
+  const rpcNow = () => {
+    try {
+      return ctx.client?.rpc ? ctx.client.rpc(FishStateDef) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  // ---------- state listener 生命周期（顶层作用域：cleanup 可摘） ----------
+  const syncFromSnapshot = (s) => {
+    st = s || null;
+    // 语言长期来源是 server 权威（state.lang）：不再以固定 en 兜底；旧 server 无该字段时保留现值
+    if (st && typeof st.lang === "string" && FISH_OVERLAY_PAGE_STR[st.lang] && st.lang !== langPref) {
+      log("info", "lang authority change", { from: langPref, to: st.lang });
+      langPref = st.lang;
+    }
+    // 重置鱼脑后 server 发 null sessionID：跟着清空；换会话也随快照同步
+    fishSid = st && typeof st.sessionID === "string" ? st.sessionID : null;
+    push();
+  };
+  const onStateEvent = (ev) => syncFromSnapshot(ev && ev.data);
+  let stateOff = null; // 当前 state listener 的摘除函数
+  let stateClient = undefined; // listener 所骑的 ctx.client（undefined = 未挂）
+  const detachStateListener = () => {
+    if (stateOff) {
+      try {
+        stateOff();
+      } catch {}
+      stateOff = null;
+    }
+    stateClient = undefined;
+  };
+  const attachStateListener = (client) => {
+    detachStateListener(); // 先摘旧：重连后绝不累积重复 listener
+    try {
+      const r = client && client.rpc ? client.rpc(FishStateDef) : null;
+      if (!r) throw new Error("rpc unavailable");
+      stateOff = r.events.on("state", onStateEvent, { signal: ctx.signal });
+      stateClient = client;
+    } catch (cause) {
+      log("warn", "state subscribe failed", { error: String(cause) });
+    }
+  };
+
+  // 余额聚合（与窗口版同语义）：client 逐次读取（rpcNow），server 重启后自动用新 client
+  const runBalance = async (force) => {
+    const rpc = rpcNow();
+    if (!rpc) return;
+    let out = null;
+    try {
+      out = await rpc.balance({ force });
+    } catch {
+      return;
+    }
+    const rows = out && Array.isArray(out.results) ? out.results : [];
+    let worst = -1;
+    let report = "";
+    let bad = null;
+    for (const r of rows) {
+      if (!r || typeof r.name !== "string") continue;
+      if (r.error) {
+        bad = bad ?? (r.error === "unauthorized" ? "unauthorized" : "other");
+        continue;
+      }
+      if (typeof r.remaining !== "number" || typeof r.total !== "number" || !(r.total > 0)) continue;
+      const pct = clamp(100 * (1 - r.remaining / r.total), 0, 100);
+      worst = Math.max(worst, pct);
+      const L = STR[slang()];
+      report = report
+        ? report
+        : r.name === "DeepSeek"
+          ? L.balanceReport(r.remaining.toFixed(2))
+          : L.balanceCustom(r.name || L.customName, r.remaining);
+    }
+    if (worst >= 0) {
+      const idx = worst >= 100 ? 5 : Math.floor(worst / 20);
+      balanceNow = { idx, text: STR[slang()].withLabel(report, STR[slang()].balanceLabels[idx]), at: Date.now() };
+      push();
+      log("info", "balance push", { idx });
+    } else if (force) {
+      const L = STR[slang()].bubbles;
+      if (bad === "unauthorized") balanceNow = { idx: 5, text: L.balanceInvalid, at: Date.now() };
+      else if (bad) balanceNow = { idx: 5, text: L.balanceFailed, at: Date.now() };
+      else balanceNow = { idx: 5, text: L.balanceNoKey, at: Date.now() };
+      push();
+    }
+  };
+
+  const slang = () => (langPref in FISH_OVERLAY_PAGE_STR ? langPref : "en");
+  const compact = () => ({
+    lang: slang(),
+    tier: st ? st.tier : null,
+    flash: st ? st.flash : null,
+    tool: st ? st.tool : null,
+    notice: st ? st.notice : null,
+    name: st ? st.name : null,
+    // 共享偏好权威（server settings）：页内菜单标签/尺寸跟随
+    whisper: st && typeof st.whisper === "boolean" ? st.whisper : true,
+    notify: st && typeof st.notify === "boolean" ? st.notify : false,
+    width: st && typeof st.width === "number" ? st.width : 200,
+    // 待办安全投影（server todos）：列表页展示
+    todos: st && Array.isArray(st.todos) ? st.todos : [],
+    chatBusy,
+    murmur: murmurNow,
+    balance: balanceNow,
+    chatFail: chatFailNow,
+    contractSay: contractSayNow,
+    contractPlay: contractPlayNow,
+    nameResult: nameResultNow,
+    resetResult: resetResultNow,
+    actionResult: actionResultNow,
+  });
+  const push = () => {
+    if (cleaned || !loaded || !win || win.isDestroyed()) return;
+    try {
+      win.webContents.send("fish-pet:state", compact());
+    } catch {
+      /* 窗口正在销毁 */
+    }
+  };
+
+  const setMode = (next, why) => {
+    if (next !== "off" && next !== "pending" && next !== "active") next = "off";
+    if (next === mode) return;
+    mode = next;
+    log("info", "mode", { mode, why: why || "" });
+    pushOverlayState();
+  };
+  // 模式/睡眠态变化统一出口：窗口侧 Contract status 缓存与 UI 都靠它
+  const pushOverlayState = () => {
+    try {
+      provider?.changed();
+      provider?.emit("active", { mode, sleeping: overlaySleeping });
+    } catch {
+      /* 提供器刚回收 */
+    }
+  };
+
+  // ---------- 供 Ipc：先提供（窗口立刻能拿到 off/pending 的确定性答案），再慢启动 ----------
+  try {
+    provider = ctx.provide(FishOverlayDef, {
+      state: () => ({ mode, sleeping: overlaySleeping }),
+      mode: () => ({ mode, sleeping: overlaySleeping }),
+      setLang: (input) => {
+        // 兼容入口（旧窗口）：立即生效并转发给 server language RPC——server 仍是唯一权威，
+        // 新代码路径（窗口菜单/overlay 菜单）都直接走 language RPC，不经过这里
+        if (typeof input.lang !== "string" || !FISH_OVERLAY_PAGE_STR[input.lang]) return;
+        langPref = input.lang;
+        const rpc = rpcNow();
+        if (rpc?.language) {
+          void rpc
+            .language({ lang: input.lang })
+            .then((s) => {
+              if (s) syncFromSnapshot(s); // 返回即最新快照：直接应用（含权威 lang）
+            })
+            .catch(() => {});
+        }
+        push();
+      },
+      report: (input) => {
+        log("info", "window report", { hasFish: !!input.hasFish, mode });
+      },
+      // 窗口 Contract 的 say/play 在 overlay active 时转发到桌外身体（页内睡着回拒绝台词）
+      contract: (input) => {
+        if (mode !== "active") return;
+        const kind = input && typeof input.kind === "string" ? input.kind : "";
+        if (kind === "say") {
+          contractSayNow = { text: String(input.text ?? "").slice(0, 200), at: Date.now() };
+          push();
+          log("info", "contract say forwarded", { len: contractSayNow.text.length });
+        } else if (kind === "play") {
+          const name = typeof input.name === "string" ? input.name : "";
+          if (!ASSETS[name]) {
+            log("warn", "contract play unknown clip", {});
+            return;
+          }
+          contractPlayNow = { name, at: Date.now() };
+          push();
+          log("info", "contract play forwarded", { name: name.length });
+        }
+      },
+      // 窗口 dialog 文本录入回包：ok=false 是用户取消（静默）；ok+text 才调 RPC，结果走真实通道
+      promptResult: (input) => {
+        if (input.ok !== true) return; // 取消：不报失败
+        const kind = input && typeof input.kind === "string" ? input.kind : "";
+        const text = typeof input.text === "string" ? input.text.trim() : "";
+        if (!text) return;
+        if (kind === "todo") {
+          const rpc = rpcNow();
+          if (!rpc?.todoAdd) {
+            actionResultNow = { kind: "todoAdd", ok: false, at: Date.now() };
+            push();
+            return;
+          }
+          void rpc
+            .todoAdd({ text: text.slice(0, 120) })
+            .then(
+              (s) => {
+                actionResultNow = { kind: "todoAdd", ok: !!s, value: text.slice(0, 120), at: Date.now() };
+                if (s) syncFromSnapshot(s);
+                push();
+              },
+              () => {
+                actionResultNow = { kind: "todoAdd", ok: false, value: text.slice(0, 120), at: Date.now() };
+                push();
+              },
+            )
+            .catch(() => {});
+        } else if (kind === "name") {
+          const rpc = rpcNow();
+          if (!rpc?.name) {
+            nameResultNow = { ok: false, name: "", at: Date.now() };
+            push();
+            return;
+          }
+          // server trim 会折叠连续空白：同归一后比较，避免实际成功误报失败
+          const expect = text.slice(0, 24).replace(/\s+/g, " ");
+          void rpc
+            .name({ name: text.slice(0, 24) })
+            .then(
+              (s) => {
+                nameResultNow = { ok: !!(s && typeof s.name === "string" && s.name === expect), name: expect, at: Date.now() };
+                if (s) syncFromSnapshot(s);
+                push();
+                log("info", "name rpc applied", { ok: nameResultNow.ok });
+              },
+              () => {
+                nameResultNow = { ok: false, name: expect, at: Date.now() };
+                push();
+              },
+            )
+            .catch(() => {});
+        }
+      },
+    });
+  } catch (cause) {
+    log("error", "provide failed", { error: String(cause) });
+    return;
+  }
+  log("info", "main setup started", { id: ctx.id, enabled, mode, platform: process.platform });
+  if (!enabled) {
+    setMode("off", "disabled by options");
+    return () => {};
+  }
+
+  const cleanup = (reason) => {
+    if (cleaned) return;
+    cleaned = true;
+    log("info", "cleanup run", { reason });
+    try {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+    } catch {}
+    try {
+      if (balanceTimer) clearInterval(balanceTimer);
+    } catch {}
+    try {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+    } catch {}
+    try {
+      if (presenceTimer) clearInterval(presenceTimer);
+    } catch {}
+    try {
+      if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
+    } catch {}
+    for (const t of prefetchTimers) {
+      try {
+        clearTimeout(t);
+      } catch {}
+    }
+    prefetchTimers = [];
+    execStopped = true; // 终止 execution 监督循环
+    try {
+      if (execRetryTimer) clearTimeout(execRetryTimer);
+    } catch {}
+    try {
+      execWaitResolve?.(); // 唤醒在重连等待里挂着的循环，让其看到终止条件退出
+    } catch {}
+    detachStateListener();
+    try {
+      if (cmdHandler) require("electron").ipcMain.removeListener("fish-pet:cmd", cmdHandler);
+    } catch {}
+    try {
+      if (win && !win.isDestroyed()) win.destroy();
+    } catch {}
+    try {
+      if (overlayDir) require("node:fs").rmSync(overlayDir, { recursive: true, force: true });
+    } catch {}
+    try {
+      provider?.dispose();
+    } catch {}
+  };
+  ctx.onCleanup(() => cleanup("ctx.onCleanup"));
+
+  // ---------- 覆盖窗口（spike 验证过的形态：小尺寸 fixed 透明 → Sway floating_con） ----------
+  void (async () => {
+    let electron = null;
+    try {
+      electron = require("electron");
+    } catch {
+      setMode("off", "electron unavailable");
+      return;
+    }
+    const nodefs = require("node:fs");
+    const nodepath = require("node:path");
+    const nodeos = require("node:os");
+    try {
+      overlayDir = nodefs.mkdtempSync(nodepath.join(nodeos.tmpdir(), "fish-pet-overlay-"));
+      const initialWidth = st && typeof st.width === "number" ? st.width : 200;
+      const composed = composeOverlayHtml(ASSETS, POOLS, CLICK_SOUND, slang(), initialWidth);
+      nodefs.writeFileSync(nodepath.join(overlayDir, "index.html"), composed.html);
+      nodefs.writeFileSync(nodepath.join(overlayDir, "preload.js"), FISH_OVERLAY_PRELOAD_JS);
+      log("info", "overlay files ready", { clips: composed.clips.length, htmlBytes: composed.html.length });
+    } catch (cause) {
+      log("error", "overlay files failed", { error: String(cause) });
+      setMode("off", "files failed");
+      return;
+    }
+
+    try {
+      win = new electron.BrowserWindow({
+        width: 360,
+        height: 240,
+        show: false,
+        frame: false,
+        transparent: true,
+        hasShadow: false,
+        roundedCorners: false,
+        resizable: false,
+        focusable: false,
+        skipTaskbar: true,
+        alwaysOnTop: true,
+        title: "fish-pet",
+        webPreferences: {
+          sandbox: true,
+          contextIsolation: true,
+          nodeIntegration: false,
+          preload: require("node:path").join(overlayDir, "preload.js"),
+        },
+      });
+    } catch (cause) {
+      log("error", "BrowserWindow failed", { error: String(cause) });
+      setMode("off", "window failed");
+      return;
+    }
+    // 小窗整体可交互（不 ignoreMouseEvents）：鱼区点击/菜单在页内；空边由 app-region 拖拽消化，
+    // 或经 Sway $mod+左键直接拖浮动 con。Wayland 下不自作 setPosition。
+    log("info", "BrowserWindow created", { windowId: win.id });
+
+    let shown = false;
+    const presencePing = () => {
+      if (cleaned || mode !== "active") return;
+      const rpc = rpcNow();
+      if (rpc?.presence) {
+        if (debug) log("info", "presence ping", { sleeping: overlaySleeping });
+        void rpc.presence({ sleeping: overlaySleeping }).catch(() => {});
+      }
+    };
+    const showWindow = (by) => {
+      if (shown || !win || win.isDestroyed()) return;
+      shown = true;
+      try {
+        win.showInactive();
+        if (!win.isVisible()) win.show();
+      } catch {}
+      setMode("active", "shown via " + by);
+      presencePing(); // 桌外在场立即可见：窗口全关也保住观众门控与梦话睡眠态
+      // 位置由窗口管理器决定（Sway 浮动 con 居中）；Wayland 下 setPosition/getBounds 不可信，绝不自作摆放
+    };
+    win.once("ready-to-show", () => showWindow("ready-to-show"));
+    watchdogTimer = setTimeout(() => {
+      if (!shown) {
+        log("error", "show watchdog fired", {});
+        try {
+          if (win && !win.isDestroyed()) win.destroy();
+        } catch {}
+        win = null;
+        setMode("off", "show watchdog");
+      }
+    }, 9000);
+
+    win.webContents.on("did-finish-load", () => {
+      loaded = true;
+      push();
+      log("info", "did-finish-load", {});
+      // 素材预热：完整 109 段经 fish-pet:asset 低速推送（每 120ms 一段 ≈13s 铺满），页内缓存；
+      // 未预热段 roll 未命中时页侧还会按需请求。预热期间逐段校验存活，cleanup 停止。
+      let names = [];
+      try {
+        names = Object.keys(ASSETS);
+      } catch {}
+      names.forEach((name, i) => {
+        const t = setTimeout(() => {
+          if (cleaned || !win || win.isDestroyed()) return;
+          try {
+            win.webContents.send("fish-pet:asset", { name, data: ASSETS[name] });
+          } catch {}
+        }, 1500 + i * 120);
+        prefetchTimers.push(t);
+      });
+      if (!debug) return;
+      // 调试探针（仅 overlayDebug）：视频推进 + 两次窗口自捕获 + 合成 poke 输入链路验证
+      const probeVideo = (tag) => {
+        if (!win || win.isDestroyed()) return;
+        const code =
+          '(function(){var v=document.querySelector(".fish-video.fish-front")||document.querySelector("video");' +
+          "if(!v)return JSON.stringify({video:false});" +
+          'return JSON.stringify({clip:window.__fishClip||null,pokes:window.__fishPokes||0,currentTime:v.currentTime,paused:v.paused,readyState:v.readyState,videoWidth:v.videoWidth,videoHeight:v.videoHeight});})()';
+        win.webContents
+          .executeJavaScript(code)
+          .then((out) => log("info", "video probe " + tag, { probe: JSON.parse(out) }))
+          .catch((cause) => log("warn", "video probe " + tag + " failed", { error: String(cause) }));
+      };
+      const capture = (tag) => {
+        if (!win || win.isDestroyed()) return;
+        win.webContents
+          .capturePage()
+          .then((image) => {
+            try {
+              require("node:fs").mkdirSync(evidenceDir, { recursive: true });
+              require("node:fs").writeFileSync(evidenceDir + "/capture-" + tag + ".png", image.toPNG());
+              log("info", "capturePage " + tag, { bytes: image.toPNG().length });
+            } catch {}
+          })
+          .catch((cause) => log("warn", "capturePage " + tag + " failed", { error: String(cause) }));
+      };
+      const pokeTest = () => {
+        if (!win || win.isDestroyed()) return;
+        try {
+          win.webContents.sendInputEvent({ type: "mouseDown", x: 180, y: 180, button: "left", clickCount: 1 });
+          win.webContents.sendInputEvent({ type: "mouseUp", x: 180, y: 180, button: "left", clickCount: 1 });
+          setTimeout(() => probeVideo("after-poke"), 600);
+        } catch (cause) {
+          log("warn", "sendInputEvent failed", { error: String(cause) });
+        }
+      };
+      setTimeout(() => probeVideo("1"), 900);
+      setTimeout(() => capture("1"), 1500);
+      setTimeout(() => pokeTest(), 2600);
+      setTimeout(() => {
+        // 合成一次性通道：碎碎念气泡+cue 片、工作档位——验证页内状态应用链路
+        murmurNow = { text: "(debug) 碎碎念链路自检", cue: POOLS.whisper[0], at: Date.now() };
+        push();
+        setTimeout(() => capture("2-murmur"), 1600);
+        setTimeout(() => {
+          murmurNow = null;
+          const savedTier = st ? st.tier : null;
+          st = Object.assign({}, st, { tier: "working", tool: "debug" });
+          push();
+          setTimeout(() => {
+            capture("3-working");
+            st = Object.assign({}, st, { tier: savedTier, tool: savedTier === "working" ? (st && st.tool) : null });
+            push();
+            setTimeout(() => capture("4-restored"), 1800);
+          }, 2200);
+        }, 2400);
+      }, 4200);
+      // 语言链路自检：页内直接 fishIpc.send("lang","zh")（与菜单点击同一 IPC 路径），
+      // 等 server 权威经 state 回流后打开菜单验证 zh 标签，再补一条手动碎碎念观察中文输出
+      setTimeout(() => {
+        if (!win || win.isDestroyed()) return;
+        try {
+          void win.webContents.executeJavaScript("try{fishIpc.send('lang','zh')}catch(e){}").catch(() => {});
+        } catch {}
+        setTimeout(() => {
+          if (!win || win.isDestroyed()) return;
+          win.webContents
+            .executeJavaScript(
+              'var h=document.querySelector(".fish-hit");h.dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,cancelable:true,clientX:60,clientY:60}));' +
+                'var m=document.querySelector(".fish-menu");JSON.stringify({menuOpen:!!m,labels:m?[].map.call(m.querySelectorAll("button"),function(b){return b.textContent}):[]})',
+            )
+            .then((out) => {
+              log("info", "lang probe", JSON.parse(out));
+              return capture("5-lang-zh");
+            })
+            .then(() => {
+              // 收菜单 + 触发一条真实手动碎碎念（zh prompt → 模型输出中文与否由模型决定）
+              try {
+                void win.webContents
+                  .executeJavaScript(
+                    'document.body.dispatchEvent(new MouseEvent("pointerdown",{bubbles:true}));try{fishIpc.send("murmur")}catch(e){}',
+                  )
+                  .catch(() => {});
+              } catch {}
+            })
+            .catch((cause) => log("warn", "lang probe failed", { error: String(cause) }));
+        }, 2500);
+      }, 9500);
+      // ---- 对齐链路自检（仅 overlayDebug）：睡觉 presence、murmurGate 真实翻转、prompt 路由、
+      // 随机动作素材、菜单滚动能力。全部走与用户点击同一 IPC 路径，合成字符串，无真实模型请求。----
+      const menuLabels = () =>
+        win.webContents
+          .executeJavaScript(
+            'var h=document.querySelector(".fish-hit");h.dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,cancelable:true,clientX:60,clientY:60}));' +
+              'var m=document.querySelector(".fish-menu");JSON.stringify({labels:m?[].map.call(m.querySelectorAll("button"),function(b){return b.textContent}):[],' +
+              'scroll:m?{sh:m.scrollHeight,ch:m.clientHeight}:null})',
+          )
+          .then((out) => JSON.parse(out));
+      const send = (code) => {
+        try {
+          void win.webContents.executeJavaScript(code).catch(() => {});
+        } catch {}
+      };
+      setTimeout(() => {
+        if (!win || win.isDestroyed()) return;
+        // 1) 睡觉：sleep cmd → provider sleeping + presence 立即拍
+        send('try{fishIpc.send("sleep",true)}catch(e){}');
+        setTimeout(async () => {
+          if (!win || win.isDestroyed()) return;
+          try {
+            const snap = await provided.impl.mode();
+            log("info", "sleep probe", { sleeping: snap.sleeping });
+          } catch {}
+          send('try{fishIpc.send("sleep",false)}catch(e){}');
+        }, 1800);
+      }, 12000);
+      setTimeout(() => {
+        if (!win || win.isDestroyed()) return;
+        // 2) murmurGate：读当前标签 → 发真实 next → 等 state 回流 → 复读标签确认翻转
+        menuLabels()
+          .then((m1) => {
+            const offShown = (m1.labels || []).some((x) => x === "关碎碎念" || x === "Turn muttering off");
+            log("info", "gate probe before", { offShown });
+            send('try{fishIpc.send("murmurGate",' + (offShown ? "false" : "true") + ")}catch(e){}");
+          })
+          .catch(() => {});
+        setTimeout(() => {
+          if (!win || win.isDestroyed()) return;
+          win.webContents
+            .executeJavaScript("JSON.stringify({whisper:window.__fishWhisper,clip:window.__fishClip||null})")
+            .then((out) => {
+              const parsed = JSON.parse(out);
+              return menuLabels().then((m2) => {
+                const offShown2 = (m2.labels || []).some((x) => x === "关碎碎念" || x === "Turn muttering off");
+                log("info", "gate probe after", { offShown: offShown2, pageWhisper: parsed.whisper, scroll: m2.scroll });
+              });
+            })
+            .catch(() => {});
+        }, 6000);
+      }, 15000);
+      setTimeout(() => {
+        if (!win || win.isDestroyed()) return;
+        // 3) prompt 路由：todoAdd cmd → main 定向窗口开宿主 dialog（真实窗口会出现，用户可 Esc 取消）
+        send('try{fishIpc.send("todoAdd")}catch(e){}');
+        setTimeout(() => {
+          if (!win || win.isDestroyed()) return;
+          // 4) 随机动作：预热已铺满（≈13s），点菜单换个动作应能直接播分类素材
+          send(
+            'var h=document.querySelector(".fish-hit");h.dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,cancelable:true,clientX:60,clientY:60}));' +
+              'var m=document.querySelector(".fish-menu");[].forEach.call(m.querySelectorAll("button"),function(b){if(b.textContent==="换个动作"||b.textContent==="Another move")b.click()});',
+          );
+          setTimeout(() => {
+            if (!win || win.isDestroyed()) return;
+            win.webContents
+              .executeJavaScript("JSON.stringify({clip:window.__fishClip||null})")
+              .then((out) => log("info", "random move probe", JSON.parse(out)))
+              .catch(() => {});
+          }, 1500);
+        }, 1200);
+      }, 18000);
+    });
+    // WM/程序关闭（非 cleanup 自身 destroy）：回退窗口内鱼；cleanup 路径 cleaned=true 不重复 mode/事件
+    win.on("closed", () => {
+      log("info", "overlay window closed", {});
+      if (cleaned) return;
+      setMode("off", "window closed");
+    });
+    // 渲染进程崩溃：销毁坏窗（触发上面的 closed → 回退窗口鱼）；不自动重建，避免无限重启面
+    win.webContents.on("render-process-gone", (_event, details) => {
+      log("error", "render-process-gone", { reason: details?.reason, exitCode: details?.exitCode });
+      if (cleaned) return;
+      try {
+        if (win && !win.isDestroyed()) win.destroy();
+      } catch {}
+    });
+
+    try {
+      await win.loadFile(require("node:path").join(overlayDir, "index.html"));
+    } catch (cause) {
+      log("error", "loadFile rejected", { error: String(cause) });
+      try {
+        if (win && !win.isDestroyed()) win.destroy();
+      } catch {}
+      win = null;
+      setMode("off", "load failed");
+      return;
+    }
+
+    // ---------- 页 → main 命令（开聊/手动碎碎念/手动余额）：只认本窗口 sender ----------
+    cmdHandler = (event, data) => {
+      if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
+      const cmd = data && typeof data.cmd === "string" ? data.cmd : "";
+      log("info", "cmd", { cmd });
+      try {
+        if (cmd === "chat") {
+          const focused = ctx.windows.focused?.() ?? ctx.windows.list?.()[0];
+          if (!focused) {
+            chatFailNow = { at: Date.now() };
+            push();
+            return;
+          }
+          try {
+            if (!focused.isVisible()) focused.show();
+          } catch {}
+          provider?.emit("chat", {}, focused.id);
+        } else if (cmd === "murmur") {
+          // 手动碎碎念：桌外睡着时同窗口菜单语义说梦话
+          const rpc = rpcNow();
+          if (rpc) void rpc.whisper({ dream: overlaySleeping }).catch(() => {});
+        } else if (cmd === "lang") {
+          // overlay 语言菜单：白名单校验后转发 server language RPC（权威更新经 state 回流全端）；
+          // RPC 返回的就是最新快照——直接应用，不依赖事件回流时序
+          const l = data && data.value;
+          if (l === "zh" || l === "en" || l === "ja") {
+            const rpc = rpcNow();
+            if (rpc?.language) {
+              void rpc
+                .language({ lang: l })
+                .then(
+                  (s) => {
+                    if (s) syncFromSnapshot(s);
+                    log("info", "language rpc applied", { lang: l, serverLang: s && s.lang });
+                  },
+                  (cause) => log("warn", "language rpc failed", { error: String(cause) }),
+                )
+                .catch(() => {});
+            } else log("warn", "language rpc unavailable", {});
+          } else {
+            log("warn", "lang cmd rejected", { value: String(l) });
+          }
+        } else if (cmd === "sleep") {
+          // 桌外睡眠唯一来源：页菜单翻转 → main 记忆 + 立即 presence + 通知窗口（Contract status）
+          overlaySleeping = data && data.value === true;
+          pushOverlayState();
+          presencePing();
+        } else if (cmd === "asset") {
+          const name = data && typeof data.value === "string" ? data.value : "";
+          if (name && ASSETS[name]) {
+            try {
+              win.webContents.send("fish-pet:asset", { name, data: ASSETS[name] });
+            } catch {}
+          } else log("warn", "asset cmd rejected", {});
+        } else if (cmd === "todoAdd" || cmd === "name") {
+          // 文本录入不在不可聚焦小窗收键盘：定向到聚焦 OpenCode 窗口开宿主 dialog，
+          // 结果经 promptResult Ipc 回 main 调 RPC。无可用窗口给明确失败（不乐观）。
+          const kind = cmd === "todoAdd" ? "todo" : "name";
+          const focused = ctx.windows.focused?.() ?? ctx.windows.list?.()[0];
+          if (!focused) {
+            actionResultNow = { kind: "prompt", ok: false, at: Date.now() };
+            push();
+            log("warn", "prompt no window", { kind });
+            return;
+          }
+          try {
+            if (!focused.isVisible()) focused.show();
+          } catch {}
+          provider?.emit("prompt", { kind }, focused.id);
+          log("info", "prompt routed", { kind, window: focused.id });
+        } else if (cmd === "todoClear") {
+          const rpc = rpcNow();
+          if (rpc?.todoClear) {
+            void rpc
+              .todoClear()
+              .then((s) => {
+                actionResultNow = { kind: "todoClear", ok: !!s, at: Date.now() };
+                if (s) syncFromSnapshot(s);
+                push();
+              })
+              .catch(() => {
+                actionResultNow = { kind: "todoClear", ok: false, at: Date.now() };
+                push();
+              });
+          } else {
+            actionResultNow = { kind: "todoClear", ok: false, at: Date.now() };
+            push();
+          }
+        } else if (cmd === "notify" || cmd === "murmurGate") {
+          // 共享偏好经 server settings 权威写入；actionResult 只反映真实回包
+          const v = data && data.value === true;
+          const field = cmd === "notify" ? "notify" : "whisper";
+          const rpc = rpcNow();
+          if (rpc?.settings) {
+            void rpc
+              .settings({ [field]: v })
+              .then(
+                (s) => {
+                  actionResultNow = { kind: field, ok: !!(s && typeof s[field] === "boolean" && s[field] === v), value: v, at: Date.now() };
+                  if (s) syncFromSnapshot(s);
+                  push();
+                },
+                () => {
+                  actionResultNow = { kind: field, ok: false, value: v, at: Date.now() };
+                  push();
+                },
+              )
+              .catch(() => {});
+          } else {
+            actionResultNow = { kind: field, ok: false, value: v, at: Date.now() };
+            push();
+            log("warn", "settings rpc unavailable", { field });
+          }
+        } else if (cmd === "bigger" || cmd === "smaller") {
+          const cur = st && typeof st.width === "number" ? st.width : 200;
+          const next = clamp(cur + (cmd === "bigger" ? 20 : -20), 120, 360);
+          const rpc = rpcNow();
+          if (rpc?.settings) {
+            void rpc
+              .settings({ width: next })
+              .then(
+                (s) => {
+                  actionResultNow = { kind: "width", ok: !!(s && s.width === next), at: Date.now() };
+                  if (s) syncFromSnapshot(s);
+                  push();
+                },
+                () => {
+                  actionResultNow = { kind: "width", ok: false, at: Date.now() };
+                  push();
+                },
+              )
+              .catch(() => {});
+          }
+        } else if (cmd === "reset") {
+          const rpc = rpcNow();
+          if (rpc?.resetBrain) {
+            void rpc
+              .resetBrain({})
+              .then((s) => {
+                resetResultNow = { ok: true, at: Date.now() };
+                if (s) syncFromSnapshot(s);
+                push();
+                log("info", "reset ok", {});
+              })
+              .catch(() => {
+                resetResultNow = { ok: false, at: Date.now() };
+                push();
+                log("warn", "reset failed", {});
+              });
+          }
+        } else if (cmd === "balance") {
+          void runBalance(true);
+        }
+      } catch (cause) {
+        log("warn", "cmd failed", { cmd, error: String(cause) });
+      }
+    };
+    try {
+      electron.ipcMain.on("fish-pet:cmd", cmdHandler);
+    } catch (cause) {
+      log("error", "ipcMain.on failed", { error: String(cause) });
+    }
+
+    // ---------- server 脑接驳（监督式）：state 双通道 + execution 流低速重连 ----------
+    // listener 挂摘在顶层（cleanup 可达）；这里只做时序：先挂 listener、立即心跳一拍、30s 周期兜底。
+    const heartbeat = async () => {
+      if (cleaned || ctx.signal.aborted) return;
+      const client = ctx.client; // 逐次读取：server 重启后这里是新 client
+      try {
+        const r = client && client.rpc ? client.rpc(FishStateDef) : null;
+        if (!r) throw new Error("client unavailable");
+        const s = await r.state({});
+        if (cleaned) return; // in-flight 落地时插件已收摊：不写状态
+        syncFromSnapshot(s);
+        // 每次成功心跳无条件重挂 listener（先摘后挂，共享同一事件流不新建连接）：
+        // 同端口 server 重启可能复用 client 对象且心跳未失败——条件重挂会漏掉静默结束的
+        // listener，事件推送退化为 30s 快照。30s 快照兜底保留。
+        attachStateListener(client);
+      } catch (cause) {
+        log("warn", "state heartbeat failed", { error: String(cause) });
+      }
+    };
+    attachStateListener(ctx.client);
+    void heartbeat(); // 立即一拍：不等 30s 就有首帧快照
+    heartbeatTimer = setInterval(() => {
+      void heartbeat();
+    }, 30000);
+
+    // 鱼会话完成：读 message.list 解析 cue（与窗口版 fishReply 同语义），气泡+点播推给 overlay
+    const fishReply = async () => {
+      if (!fishSid || cleaned) return;
+      try {
+        const res = await ctx.client.message.list({ sessionID: fishSid, order: "desc", limit: 8 });
+        if (cleaned) return;
+        const msg = (res.data ?? []).find((m) => m.type === "assistant");
+        if (!msg) return;
+        if (msg.finish === "error") {
+          murmurNow = { error: true, at: Date.now() };
+          push();
+          return;
+        }
+        const text = textOf(msg).trim();
+        if (!text) return;
+        const cue = text.match(/\[播放[:：]\s*([^\]]+)\]/);
+        const clean = text.replace(/\[播放[:：][^\]]+\]/g, "").trim();
+        const clip = cue && POOLS.cueMap[cue[1].trim()];
+        murmurNow = { text: clean.slice(0, 60), cue: clip || null, at: Date.now() };
+        push();
+        log("info", "murmur push", { cue: clip || null, len: clean.length });
+      } catch {
+        /* 会话没了：server 会自愈重建 */
+      }
+    };
+    // execution 流监督循环：done（server 重启等）或 throw 都低速重连
+    const watchExec = async () => {
+      let backoff = 1000;
+      while (!execStopped && !ctx.signal.aborted && !cleaned) {
+        let lived = false;
+        try {
+          const sub = ctx.client.event.subscribe({
+            types: [
+              "session.execution.started",
+              "session.execution.succeeded",
+              "session.execution.failed",
+              "session.execution.interrupted",
+            ],
+            signal: ctx.signal,
+          });
+          for await (const ev of sub) {
+            lived = true;
+            backoff = 1000; // 收到事件：连接是活的，退避复位
+            const sid = ev.data && ev.data.sessionID;
+            if (!sid || sid !== fishSid) continue;
+            if (ev.type === "session.execution.started") {
+              // 鱼会话执行中（面板聊天或定时/手动碎碎念）：页内 thinking 反馈
+              chatBusy = true;
+              push();
+              try {
+                if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
+              } catch {}
+              busyWatchdogTimer = setTimeout(() => {
+                if (chatBusy && !cleaned) {
+                  chatBusy = false;
+                  push();
+                  log("warn", "chatBusy watchdog fired", {});
+                }
+                busyWatchdogTimer = 0;
+              }, 90000); // 窗口版同量级：丢终态也不卡死
+            } else if (ev.type === "session.execution.succeeded") {
+              chatBusy = false;
+              try {
+                if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
+                busyWatchdogTimer = 0;
+              } catch {}
+              push();
+              void fishReply();
+            } else if (ev.type === "session.execution.failed") {
+              chatBusy = false;
+              try {
+                if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
+                busyWatchdogTimer = 0;
+              } catch {}
+              murmurNow = { error: true, at: Date.now() };
+              push();
+            } else if (ev.type === "session.execution.interrupted") {
+              chatBusy = false;
+              try {
+                if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
+                busyWatchdogTimer = 0;
+              } catch {}
+              push();
+            }
+          }
+          // 流正常结束/重连间隙：清掉卡死 busy 并停表（started/terminal 跨流不悬空）
+          if (!execStopped && !cleaned && chatBusy) {
+            chatBusy = false;
+            try {
+              if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
+              busyWatchdogTimer = 0;
+            } catch {}
+            push();
+            log("info", "chatBusy cleared on stream end", {});
+          }
+          if (!execStopped && !cleaned) log("info", "execution stream ended", {});
+        } catch (cause) {
+          if (!execStopped && !cleaned) log("warn", "execution stream failed", { error: String(cause) });
+          // 流异常断开：同样清掉卡死 busy
+          if (!execStopped && !cleaned && chatBusy) {
+            chatBusy = false;
+            try {
+              if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
+              busyWatchdogTimer = 0;
+            } catch {}
+            push();
+            log("info", "chatBusy cleared on stream failure", {});
+          }
+        }
+        if (execStopped || ctx.signal.aborted || cleaned) break;
+        // 低速重连：连接存活过回 1s；空连接逐次倍增封顶 30s，避免反复秒连的风暴
+        const wait = lived ? 1000 : Math.min(backoff, 30000);
+        if (!lived) backoff = Math.min(backoff * 2, 30000);
+        await new Promise((resolve) => {
+          execWaitResolve = resolve;
+          execRetryTimer = setTimeout(resolve, wait);
+        });
+      }
+    };
+    execStopped = false;
+    void watchExec();
+
+    // presence 心跳：桌外在场 + 睡眠态（页 cmd sleep 是睡眠唯一来源）。TTL 10min，30s 一拍足够；
+    // 窗口全关仍保住观众门控与梦话睡眠判定（presence 优先于 Web focus 的 sleeping）。
+    presenceTimer = setInterval(() => {
+      if (!ctx.signal.aborted && !cleaned) presencePing();
+    }, 30000);
+
+    // 余额：定时轮询（聚合逻辑在外层 runBalance；server 30 分钟缓存，窗口侧同款定时无害）
+    balanceTimer = setInterval(() => {
+      if (!ctx.signal.aborted && !cleaned) void runBalance(false);
+    }, 30 * 60 * 1000);
+  })().catch((cause) => {
+    log("error", "overlay boot threw", { error: String((cause && cause.stack) || cause) });
+    setMode("off", "boot threw");
+  });
+
+  return () => cleanup("returned cleanup");
+}
 
 module.exports.default = Plugin.define((() => {
   const { decl, shim } = buildPrefs();
@@ -679,11 +1709,19 @@ module.exports.default = Plugin.define((() => {
           };
           const buildMain = () => {
           item(state.sleeping ? T().menu.wake : T().menu.sleep, () => (state.sleeping ? wake() : goSleep()));
-          item(T().menu.addAnother, () => addFish());
+          item(T().menu.addAnother, () => {
+            const fish = addFish();
+            if (!fish) return; // 已达 6 只：addFish 已弹 maxFish 气泡
+            // 启动鱼由 setup 末尾的挂载循环统一 append；菜单新增的这只就地挂载，否则永不可见
+            (fallback ? document.body : fishesHost).appendChild(fish.f.root);
+            savePositions();
+          });
           if (fishes.length > 1) item(T().menu.dismiss, () => removeFish(api));
           item(T().menu.randomMove, () => {
             if (state.sleeping) return;
-            const names = [...POOLS.categories.flatMap((c) => c.actions), ...POOLS.clicks, ...POOLS.moves.map((m) => (typeof m === "string" ? m : m.name))];
+            // 与 rollNext 同规则：noMirror 分类（文字池）朝左时不抽，避免文字被镜像
+            const cats = POOLS.categories.filter((c) => !(c.noMirror && state.facing === "left"));
+            const names = [...cats.flatMap((c) => c.actions), ...POOLS.clicks, ...POOLS.moves.map((m) => (typeof m === "string" ? m : m.name))];
             playClip(pick(names), { onEnded: toIdle });
             scheduleRoll();
           });
@@ -696,56 +1734,166 @@ module.exports.default = Plugin.define((() => {
             }
           });
           item(T().menu.todo, () => void addTodo());
+          item(T().menu.todoList, buildTodoPage, true);
           item(T().menu.balance, () => void runBalance(true));
           item(T().menu.murmur, () => void whisper({ dream: state.sleeping }));
           item(T().menu.nameFish, () => void nameFish());
           item(T().menu.resetBrain, () => {
-            void fishRpc?.resetBrain?.({});
-            bubbleOn(T().bubbles.resetDone, 3500);
+            // 重置鱼脑：RPC 真成功才报"清空"，失败给三语明确提示，不无条件道贺
+            void (async () => {
+              try {
+                const s = await fishRpc?.resetBrain?.({});
+                bubbleOn(s ? T().bubbles.resetDone : T().bubbles.resetFailed, s ? 3500 : 4000);
+              } catch {
+                bubbleOn(T().bubbles.resetFailed, 4000);
+              }
+            })();
           });
+          // 通知/碎碎念/大小：server settings 权威；气泡只在真实回包（新 server 状态或旧 server 本地回退）后显示
+          const settingsOrLocal = (call, fallback, onRealSuccess) => {
+            if (call && typeof call.then === "function") {
+              void call.then(
+                (s) => {
+                  if (s && typeof s.whisper === "boolean") {
+                    applyState(s);
+                    if (onRealSuccess) onRealSuccess();
+                  } else fallback();
+                },
+                () => fallback(),
+              );
+            } else fallback();
+          };
           item(prefs.value.notify ? T().menu.notifyOff : T().menu.notifyOn, () => {
-            prefs.update((d) => {
-              d.notify = !d.notify;
-            });
-            bubbleOn(prefs.value.notify ? T().bubbles.notifyOn : T().bubbles.notifyOff);
+            const next = !prefs.value.notify;
+            settingsOrLocal(
+              fishRpc?.settings?.({ notify: next }),
+              () => {
+                prefs.update((d) => {
+                  d.notify = next;
+                });
+                bubbleOn(next ? T().bubbles.notifyOn : T().bubbles.notifyOff);
+              },
+              () => bubbleOn(next ? T().bubbles.notifyOn : T().bubbles.notifyOff),
+            );
           });
           item(prefs.value.whisper === false ? T().menu.whisperOn : T().menu.whisperOff, () => {
             const next = prefs.value.whisper === false; // 当前关 → 打开
-            prefs.update((d) => {
-              d.whisper = next;
-            });
-            bubbleOn(next ? T().bubbles.whisperOn : T().bubbles.whisperOff);
-            reportFocus(); // 立即把总闸状态同步给 server
+            settingsOrLocal(
+              fishRpc?.settings?.({ whisper: next }),
+              () => {
+                prefs.update((d) => {
+                  d.whisper = next;
+                });
+                bubbleOn(next ? T().bubbles.whisperOn : T().bubbles.whisperOff);
+                reportFocus(); // 旧 server 兼容：总开关仍走 focus 心跳
+              },
+              () => bubbleOn(next ? T().bubbles.whisperOn : T().bubbles.whisperOff),
+            );
           });
           item(T().menu.lang, buildLangPage, true);
           item(T().menu.bigger, () => {
-            prefs.update((d) => {
-              d.width = clamp(d.width + 20, 120, 360);
-            });
-            for (const w of fishes) w.f.setSize(prefs.value.width);
+            const next = clamp(prefs.value.width + 20, 120, 360);
+            settingsOrLocal(
+              fishRpc?.settings?.({ width: next }),
+              () => {
+                prefs.update((d) => {
+                  d.width = next;
+                });
+                for (const w of fishes) w.f.setSize(next);
+              },
+              () => {},
+            );
           });
           item(T().menu.smaller, () => {
-            prefs.update((d) => {
-              d.width = clamp(d.width - 20, 120, 360);
-            });
-            for (const w of fishes) w.f.setSize(prefs.value.width);
+            const next = clamp(prefs.value.width - 20, 120, 360);
+            settingsOrLocal(
+              fishRpc?.settings?.({ width: next }),
+              () => {
+                prefs.update((d) => {
+                  d.width = next;
+                });
+                for (const w of fishes) w.f.setSize(next);
+              },
+              () => {},
+            );
           });
           item(T().menu.home, () => {
             setPos(window.innerWidth - stageW() - 24, 84);
             if (!state.sleeping && !shared.work && !shared.flash) toIdle();
           });
           };
-          // 语言选择页：直接点选目标语言（当前项打勾），不再循环
+          // 语言选择页：点选后经 language RPC 写入 server 权威（全端经 state 同步回各窗口/overlay）；
+          // 旧 server 无该方法时回退本地 prefs（不持久化，下一次权威 lang 会盖回来）
           const buildLangPage = () => {
             menu.replaceChildren();
             item("← " + T().menu.back, buildMain, true);
             for (const code of LANGS) {
               item((code === lang() ? "✓ " : "") + LANG_NAMES[code], () => {
-                prefs.update((d) => {
-                  d.lang = code;
-                });
-                bubbleOn(STR[code].bubbles.langSwitched);
-                reportFocus(); // 立即把语言同步给 server（碎碎念/气泡用语）
+                bubbleOn(STR[code].bubbles.langSwitched, 3000);
+                const applyFallback = () => {
+                  prefs.update((d) => {
+                    d.lang = code;
+                  });
+                };
+                try {
+                  const call = fishRpc?.language?.({ lang: code });
+                  if (call && typeof call.then === "function") {
+                    void call.then(
+                      (s) => {
+                        if (s) applyState(s);
+                        else applyFallback();
+                      },
+                      () => applyFallback(),
+                    );
+                  } else applyFallback();
+                } catch {
+                  applyFallback();
+                }
+              });
+            }
+            placeMenu();
+          };
+          // 待办列表页：server todos 安全投影 + 清空入口（todoClear RPC；列表经 state 回流更新）
+          const buildTodoPage = () => {
+            menu.replaceChildren();
+            item("← " + T().menu.back, buildMain, true);
+            if (!serverTodos.length) {
+              const row = document.createElement("div");
+              row.className = "fish-menu-row";
+              row.textContent = T().todo.empty;
+              menu.appendChild(row);
+            }
+            for (const t of serverTodos.slice(0, 20)) {
+              const row = document.createElement("div");
+              row.className = "fish-menu-row";
+              row.textContent = t.text || "";
+              if (typeof t.dueAt === "number" && Number.isFinite(t.dueAt)) {
+                const due = document.createElement("span");
+                due.className = "due";
+                const dt = new Date(t.dueAt);
+                due.textContent =
+                  " @" + (dt.getMonth() + 1) + "-" + dt.getDate() + " " + String(dt.getHours()).padStart(2, "0") + ":" + String(dt.getMinutes()).padStart(2, "0");
+                row.appendChild(due);
+              }
+              menu.appendChild(row);
+            }
+            if (serverTodos.length) {
+              item(T().todo.clear, () => {
+                closeMenu();
+                void (async () => {
+                  let s = null;
+                  try {
+                    s = await fishRpc?.todoClear?.({});
+                  } catch {
+                    s = null;
+                  }
+                  if (s) {
+                    applyState(s);
+                    bubbleOn(T().bubbles.todoCleared, 3000);
+                  } else {
+                    bubbleOn(T().bubbles.actionFailed, 4000);
+                  }
+                })();
               });
             }
             placeMenu();
@@ -836,6 +1984,9 @@ module.exports.default = Plugin.define((() => {
         clearTimeout(saveTimer);
         saveTimer = later(() => {
           if (shared.dead) return;
+          // overlay 接管（active/pending 窗口鱼已卸）：不把空数组盖掉持久位置，
+          // 否则 20s 周期会把 prefs.positions 写成 []，回退只剩 1 条。正常 off 模式照存。
+          if (!fishes.length && (overlayMode === "active" || overlayMode === "pending")) return;
           try {
             prefs.update((d) => {
               d.positions = fishes.map((f) => ({ x: Math.round(f.f.state.x), y: Math.round(f.f.state.y) }));
@@ -857,12 +2008,60 @@ module.exports.default = Plugin.define((() => {
       let lastTier = undefined;
       let lastFlash = undefined;
       let lastNoticeAt = 0;
+      let serverTodos = []; // server todos 安全投影（列表页展示）
       let fishRpc = null;
       try {
         fishRpc = ctx.client.rpc ? ctx.client.rpc(FishStateDef) : null;
       } catch {
         fishRpc = null;
       }
+
+      // ---------- 共享偏好一次性迁移（本地 → server settings 权威）----------
+      // 只上推与内置默认（whisper:true/notify:false/width:200）不同的本地值：多端并存时避免
+      // 默认值端覆盖已迁移端；两端都有自定义值则后写胜出（无法避免，见 README）。上推成功
+      // （返回带 whisper 布尔 = 新 server）才打本地标记；旧 server/失败不打，下次 boot 重试。
+      let settingsMigrating = false;
+      const migrateSettings = (s) => {
+        if (settingsMigrating) return;
+        settingsMigrating = true;
+        const local = {};
+        if (prefs.value.whisper === false && s.whisper !== false) local.whisper = false;
+        if (!!prefs.value.notify === true && s.notify !== true) local.notify = true;
+        if (
+          typeof prefs.value.width === "number" &&
+          prefs.value.width !== 200 &&
+          prefs.value.width !== s.width
+        ) {
+          local.width = clamp(prefs.value.width, 120, 360);
+        }
+        if (!Object.keys(local).length) {
+          // 本地全默认：无需上推，直接完成迁移并开始下行同步
+          prefs.update((d) => {
+            d.settingsMigrated = true;
+          });
+          settingsMigrating = false;
+          return;
+        }
+        const call = fishRpc?.settings?.(local);
+        if (call && typeof call.then === "function") {
+          void call.then(
+            (out) => {
+              settingsMigrating = false;
+              if (out && typeof out.whisper === "boolean") {
+                prefs.update((d) => {
+                  d.settingsMigrated = true;
+                });
+                applyState(out);
+              } // 旧 server 回形（无 whisper）：不打标记，下次重试
+            },
+            () => {
+              settingsMigrating = false;
+            },
+          );
+        } else {
+          settingsMigrating = false; // 旧 client 无方法：下次 boot 重试
+        }
+      };
 
       // ---------- 会话鱼粘性绑定：鱼0 永远聚合；鱼1..N 绑运行中会话，绝不轮换 ----------
       // 规则：空闲鱼挑最活跃的无主会话；释放 = max(绑定起+30s, 完成+8s)；
@@ -893,7 +2092,7 @@ module.exports.default = Plugin.define((() => {
           binds.set(i, { sid: target.sessionID, boundAt: now, handoff: now + 1000, tier: null, tierAt: 0, releasing: 0 });
           owned.add(target.sessionID);
           const f = fishes[i].f;
-          if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play("work-waiting", { loop: true });
+          if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play(workClip("waiting"), { loop: true }); // 交接播真实 waiting 素材（旧硬编码 "work-waiting" 不在素材库）
         }
         for (const [idx, b] of binds) {
           const f = fishes[idx]?.f;
@@ -957,6 +2156,37 @@ module.exports.default = Plugin.define((() => {
         fishSid = s.sessionID ?? null; // 重置鱼脑后 server 会发 null：必须跟着清空
         if (prevSid && !fishSid) setFishBusy(false); // 重置即收口：不等完成事件（sid 已失配）
         if (typeof s.name === "string" && s.name) chatTab.title = s.name.slice(0, 16);
+        // 语言权威同步：server 的 lang 落到本窗口 prefs（UI/菜单跟随）；prefs 写入不回写 server，无循环
+        if (typeof s.lang === "string" && LANGS.includes(s.lang) && s.lang !== prefs.value.lang) {
+          prefs.update((d) => {
+            d.lang = s.lang;
+          });
+        }
+        // 共享偏好（whisper/notify/width）权威在 server settings：迁移完成后从 state 下行同步；
+        // 迁移未完成先做一次性上推，避免 server 默认值无提示覆盖本地已有偏好
+        if (typeof s.whisper === "boolean" || typeof s.notify === "boolean" || typeof s.width === "number") {
+          if (prefs.value.settingsMigrated) {
+            if (typeof s.whisper === "boolean" && s.whisper !== prefs.value.whisper) {
+              prefs.update((d) => {
+                d.whisper = s.whisper;
+              });
+            }
+            if (typeof s.notify === "boolean" && !!s.notify !== !!prefs.value.notify) {
+              prefs.update((d) => {
+                d.notify = s.notify;
+              });
+            }
+            if (typeof s.width === "number" && s.width >= 120 && s.width <= 360 && s.width !== prefs.value.width) {
+              prefs.update((d) => {
+                d.width = s.width;
+              });
+              for (const w of fishes) w.f.setSize(s.width);
+            }
+          } else {
+            migrateSettings(s);
+          }
+        }
+        if (Array.isArray(s.todos)) serverTodos = s.todos; // 待办安全投影：列表页展示
         if (Array.isArray(s.sessions)) syncBindings(s.sessions);
         if (s.notice && s.notice.at > lastNoticeAt) {
           lastNoticeAt = s.notice.at;
@@ -1329,9 +2559,19 @@ module.exports.default = Plugin.define((() => {
         try {
           const n = await ctx.dialogs.prompt({ title: T().menu.nameFish, placeholder: lang() === "zh" ? "叫它什么…" : lang() === "ja" ? "なんて呼ぶ？" : "What should we call it?" });
           if (n && n.trim()) {
-            const s = await fishRpc?.name?.({ name: n.trim() });
-            if (s) applyState(s);
-            bubbleOn(STR[lang()].bubbles.nameSet(n.trim().slice(0, 24)));
+            // 起名经 name RPC 落 server：只有真实成功才道贺，失败给明确提示（不再对未注册方法假装成功）
+            let s = null;
+            try {
+              s = await fishRpc?.name?.({ name: n.trim() });
+            } catch {
+              s = null;
+            }
+            if (s) {
+              applyState(s);
+              bubbleOn(STR[lang()].bubbles.nameSet(n.trim().slice(0, 24)));
+            } else {
+              bubbleOn(T().bubbles.nameFailed, 4000);
+            }
           }
         } catch {
           /* dialogs 缺席 */
@@ -1341,54 +2581,60 @@ module.exports.default = Plugin.define((() => {
         try {
           const text = await ctx.dialogs.prompt({ title: T().todo.title, placeholder: T().todo.placeholder });
           if (text && text.trim()) {
-            void fishRpc?.todoAdd?.({ text: text.trim() });
-            bubbleOn(T().bubbles.todoDone + text.trim().slice(0, 30), 3000);
+            // 真实 RPC 回包才报成功；失败给明确提示（不再 fire-and-forget 乐观道贺）
+            let s = null;
+            try {
+              s = await fishRpc?.todoAdd?.({ text: text.trim() });
+            } catch {
+              s = null;
+            }
+            if (s) {
+              applyState(s);
+              bubbleOn(T().bubbles.todoDone + text.trim().slice(0, 30), 3000);
+            } else {
+              bubbleOn(T().bubbles.actionFailed, 4000);
+            }
           }
         } catch {
           /* dialogs 缺席 */
         }
       }
       // =========================================================
-      // 余额六档（options.balance BYO key：deepseek / custom 列表）
+      // 余额六档（server RPC 查询：DeepSeek 凭据链 options → DB 连接 → provider 配置，custom 中转沿用 options）
+      // 自动（force=false）未配置/失败静默；手动三态：未配置 / key 失效 / 查询失败。
       // =========================================================
-      function dig(obj, path) {
-        return path.split(".").reduce((acc, k) => (acc == null ? undefined : acc[k]), obj);
-      }
       async function runBalance(force) {
-        const conf = (ctx.options && ctx.options.balance) || {};
+        let out = null;
+        try {
+          out = await fishRpc?.balance?.({ force: !!force });
+        } catch {
+          /* server 缺席或旧版无该方法 */
+        }
+        const rows = out && Array.isArray(out.results) ? out.results : [];
         let worst = -1;
         let report = "";
-        try {
-          if (conf.deepseek?.apiKey) {
-            const res = await fetch("https://api.deepseek.com/user/balance", {
-              headers: { Authorization: "Bearer " + conf.deepseek.apiKey },
-            });
-            const body = await res.json();
-            const remaining = Number(body?.balance_infos?.[0]?.total_balance ?? NaN);
-            if (!Number.isNaN(remaining)) {
-              const total = conf.deepseek.total ?? 50;
-              const pct = clamp(100 * (1 - remaining / total), 0, 100);
-              worst = Math.max(worst, pct);
-              report = T().balanceReport(remaining.toFixed(2));
-            }
+        let bad = null; // 全失败时区分 unauthorized 与其余错误
+        for (const r of rows) {
+          if (!r || typeof r.name !== "string") continue;
+          if (r.error) {
+            bad = bad ?? (r.error === "unauthorized" ? "unauthorized" : "other");
+            continue;
           }
-          const customs = Array.isArray(conf.custom) ? conf.custom : [];
-          for (const c of customs) {
-            if (!c?.url) continue;
-            const res = await fetch(c.url, { headers: c.headers ?? {} });
-            const body = await res.json();
-            const remaining = Number(dig(body, c.path ?? ""));
-            if (!Number.isNaN(remaining)) {
-              const total = c.total ?? 100;
-              const pct = clamp(100 * (1 - remaining / total), 0, 100);
-              worst = Math.max(worst, pct);
-              report = report ? report : T().balanceCustom(c.name ?? T().customName, remaining);
-            }
-          }
-        } catch {
-          /* 查询失败按无数据处理 */
+          if (typeof r.remaining !== "number" || typeof r.total !== "number" || !(r.total > 0)) continue;
+          const pct = clamp(100 * (1 - r.remaining / r.total), 0, 100);
+          worst = Math.max(worst, pct);
+          report = report
+            ? report
+            : r.name === "DeepSeek"
+              ? T().balanceReport(r.remaining.toFixed(2))
+              : T().balanceCustom(r.name || T().customName, r.remaining);
         }
-        if (worst < 0) return bubbleOn(T().bubbles.balanceNoKey, 3500);
+        if (worst < 0) {
+          if (!force) return; // 自动模式：未配置/失败静默
+          if (bad === "unauthorized") return bubbleOn(T().bubbles.balanceInvalid, 5000);
+          if (bad) return bubbleOn(T().bubbles.balanceFailed, 5000);
+          return bubbleOn(T().bubbles.balanceNoKey, 3500);
+        }
         const idx = worst >= 100 ? 5 : Math.floor(worst / 20);
         const label = T().balanceLabels[idx];
         for (const f of fishes) {
@@ -1397,17 +2643,26 @@ module.exports.default = Plugin.define((() => {
         bubbleOn(T().withLabel(report, label), 5000);
       }
       every(() => {
-        if (!shared.dead && (ctx.options && ctx.options.balance)) void runBalance(false);
+        if (!shared.dead) void runBalance(false); // 零配置用户也轮询：server 侧无配置时零上游请求
       }, 30 * 60 * 1000);
 
       // =========================================================
       // 对外 API（窗口内 Contract：说/播/读状态；睡着回拒绝台词）
-      // =========================================================
+      // overlay active（窗口鱼隐藏）时 say/play 经 main Ipc 转发到桌外身体，status 如实报 overlay，
+      // 不再对 0 条窗口鱼假报/静默 no-op。
       try {
         if (Contract) {
           const FishApi = Contract.define("fish-pet");
           ctx.provide(FishApi, {
             say: (text) => {
+              if (overlayMode === "active" && overlayApi) {
+                try {
+                  void overlayApi.contract({ kind: "say", text: String(text ?? "").slice(0, 200) });
+                  return;
+                } catch {
+                  /* 转发失败落回本地 */
+                }
+              }
               const f = leadFish();
               if (!f) return;
               if (f.state.sleeping) return f.bubble(pick(T().sleepRefusals), 3000);
@@ -1415,6 +2670,16 @@ module.exports.default = Plugin.define((() => {
             },
             play: (name) => {
               if (!ASSETS[name]) return false;
+              if (overlayMode === "active" && overlayApi) {
+                // 桌外睡着与窗口内同语义：返回 false，不转发后让桌外静默丢弃却对外报 true
+                if (overlaySleeping) return false;
+                try {
+                  void overlayApi.contract({ kind: "play", name });
+                  return true;
+                } catch {
+                  /* 转发失败落回本地 */
+                }
+              }
               const f = leadFish();
               if (!f || f.state.sleeping) return false;
               f.play(name, { onEnded: () => f.play(POOLS.names.idle, { loop: true }) });
@@ -1422,7 +2687,9 @@ module.exports.default = Plugin.define((() => {
             },
             status: () => ({
               fishCount: fishes.length,
-              sleeping: fishes.every((f) => f.f.state.sleeping),
+              // 桌外身体在场：true 时 sleeping 反映 overlay 真实睡眠态（main 缓存），不再假 0 鱙静默
+              overlay: overlayMode === "active",
+              sleeping: overlayMode === "active" ? overlaySleeping : sleepingAll(),
               work: shared.work,
               sessionID: fishSid,
             }),
@@ -1432,12 +2699,7 @@ module.exports.default = Plugin.define((() => {
         /* Contract 缺席 */
       }
 
-      // ---------- 启动 ----------
-      const saved = prefs.value.positions ?? [];
-      const count = clamp(saved.length || 1, 1, 6);
-      for (let i = 0; i < count; i++) addFish(saved[i] ?? null);
-
-      // ---------- 挂载 ----------
+      // ---------- 挂载宿主（Slot 或 body 兜底） ----------
       const fishesHost = document.createElement("div");
       fishesHost.dataset.fishHost = "1";
       let fallback = false;
@@ -1448,7 +2710,101 @@ module.exports.default = Plugin.define((() => {
         fallback = true;
       }
       // 鱼的 root 是 position:fixed：Slot 正常时挂在 slot 容器里逃逸到视口，兜底直接挂 body。
-      for (const w of fishes) (fallback ? document.body : fishesHost).appendChild(w.f.root);
+      const mountFishesRoot = () => {
+        for (const w of fishes) (fallback ? document.body : fishesHost).appendChild(w.f.root);
+      };
+      const mountFromPrefs = () => {
+        if (shared.dead || fishes.length) return;
+        const saved = prefs.value.positions ?? [];
+        const count = clamp(saved.length || 1, 1, 6);
+        for (let i = 0; i < count; i++) addFish(saved[i] ?? null);
+        mountFishesRoot();
+      };
+      const unmountAllFish = () => {
+        for (const w of [...fishes]) removeFish(w.f);
+      };
+
+      // ---------- 桌外 overlay 协调（仅 Desktop；Web 完全走原窗口内路径） ----------
+      // mode：off=窗口内鱼（默认/回退）；pending=overlay 启动中（先别挂鱼）；active=桌外鱼就绪（隐藏窗口鱼）。
+      // Web/旧宿主：ctx.main 不可用或 reject → applyOverlayMode("off") → 行为与旧版一致。
+      let overlayMode = null; // null = 未裁决
+      let overlayApi = null;
+      let overlaySleeping = false; // 桌外身体睡眠态缓存（Contract status/play 用；来源 main 的 Ipc state/事件）
+      const openChatFromOverlay = () => {
+        try {
+          ctx.layout.open?.(`${ctx.id}:chat`, ctx.sessions.current?.());
+        } catch {
+          /* 无 layout（旧宿主）*/
+        }
+      };
+      // 桌外菜单的文本录入路由：定向本窗口开宿主 dialog，结果经 promptResult 回 main。
+      // overlay 小窗 focusable:false 不可收键盘——录入永远发生在真实窗口里。
+      const onOverlayPrompt = async (d) => {
+        const kind = d && typeof d.kind === "string" ? d.kind : "";
+        try {
+          if (kind === "todo") {
+            const text = await ctx.dialogs.prompt({ title: T().todo.title, placeholder: T().todo.placeholder });
+            void overlayApi?.promptResult?.({ kind, ok: !!(text && text.trim()), text: text && text.trim() });
+          } else if (kind === "name") {
+            const n = await ctx.dialogs.prompt({
+              title: T().menu.nameFish,
+              placeholder: lang() === "zh" ? "叫它什么…" : lang() === "ja" ? "なんて呼ぶ？" : "What should we call it?",
+            });
+            void overlayApi?.promptResult?.({ kind, ok: !!(n && n.trim()), text: n && n.trim() });
+          }
+        } catch {
+          /* dialogs 缺席：静默取消，不误报失败 */
+        }
+      };
+      const applyOverlayMode = (mode) => {
+        if (mode !== "off" && mode !== "pending" && mode !== "active") mode = "off";
+        if (mode === overlayMode) return;
+        overlayMode = mode;
+        if (mode === "active") {
+          if (fishes.length) unmountAllFish(); // 桌外鱼接管展示：窗口内鱼隐藏
+        } else if (mode === "off") {
+          mountFromPrefs();
+        }
+        // pending：挂起等待 main 裁决（超时兜底在下方 later）
+        try {
+          void overlayApi?.report?.({ hasFish: fishes.length > 0 });
+        } catch {
+          /* 上报失败不影响挂载 */
+        }
+      };
+      const desktopPlatform = !!(ctx.app && ctx.app.platform === "desktop" && FishOverlayDef && ctx.main);
+      if (desktopPlatform) {
+        try {
+          overlayApi = ctx.main(FishOverlayDef);
+          overlayApi.on?.("active", (d) => {
+            if (d && typeof d.sleeping === "boolean") overlaySleeping = d.sleeping;
+            applyOverlayMode(d && d.mode);
+          });
+          overlayApi.on?.("chat", () => openChatFromOverlay());
+          overlayApi.on?.("prompt", (d) => void onOverlayPrompt(d));
+          const snap = overlayApi.state?.();
+          if (snap && snap.mode) {
+            if (typeof snap.sleeping === "boolean") overlaySleeping = snap.sleeping;
+            applyOverlayMode(snap.mode);
+          }
+          void overlayApi
+            .mode()
+            .then((s) => {
+              if (s && typeof s.sleeping === "boolean") overlaySleeping = s.sleeping;
+              applyOverlayMode(s && s.mode);
+            }, () => applyOverlayMode("off"));
+          // 语言不再由窗口启动时推送（避免多窗口竞争权威）：main 与本窗口都从 server state.lang 同步
+          // pending 超时兜底：main 挂死/老宿主时窗口鱼照常出现；若此后 overlay 才就绪，active 事件会收走
+          later(() => {
+            if (!shared.dead && overlayMode === "pending") mountFromPrefs();
+          }, 6000);
+        } catch {
+          overlayApi = null;
+          applyOverlayMode("off");
+        }
+      } else {
+        applyOverlayMode("off"); // Web：立即挂窗口内鱼
+      }
 
       return () => {
         shared.dead = true;
@@ -1461,6 +2817,10 @@ module.exports.default = Plugin.define((() => {
         if (alphaSvg) alphaSvg.remove();
         chatViews.clear();
       };
+    },
+    // Electron 主进程入口（桌面 app 单例；Web 永不运行，窗口侧 ctx.main reject 后走窗口内鱼）
+    main(ctx) {
+      return fishOverlayMain(ctx);
     },
   };
 })());
