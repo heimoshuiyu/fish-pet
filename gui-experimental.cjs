@@ -535,7 +535,9 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
       closeMenu();
       try { fishIpc.send("murmurGate", S.whisper === false); } catch (err) {}
     });
-    appendItem(T().menu.bigger, function () { closeMenu(); try { fishIpc.send("bigger"); } catch (err) {} });
+    // 大一点：舞台视觉封顶 320（与 setSize 同钳制）——已达上限直接不给可点的无效入口
+    var cw = Math.max(120, Math.min(320, Math.round(S.width) || 200));
+    if (cw < 320) appendItem(T().menu.bigger, function () { closeMenu(); try { fishIpc.send("bigger"); } catch (err) {} });
     appendItem(T().menu.smaller, function () { closeMenu(); try { fishIpc.send("smaller"); } catch (err) {} });
     appendItem(T().menu.quit, function () { closeMenu(); try { fishIpc.send("quit"); } catch (err) {} });
     appendItem(T().menu.lang, function () { buildLangPage(e); });
@@ -576,7 +578,8 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     document.addEventListener("pointerdown", onMenuAway, true);
   });
 
-  // ---- 状态应用：tier/flash 先落地，一次性通道最后播；睡觉时只留气泡不打断睡觉链 ----
+  // ---- 状态应用：tier/flash 先落地，一次性通道最后播；睡觉时只留气泡不打断睡觉链；
+  // 拖动中同理只更新数据与气泡，播片/toState 不抢 names.drag 循环片（land 后按最新状态恢复） ----
   function apply(s) {
     if (!s) return;
     if (typeof s.lang === "string" && STR[s.lang]) lang = s.lang;
@@ -588,25 +591,25 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     if (s.tier !== S.tier) {
       S.tier = s.tier;
       if (s.tier) {
-        if (!S.sleeping) play(workClip(s.tier), { loop: true });
+        if (!S.sleeping && !dragActive) play(workClip(s.tier), { loop: true });
         bubble(s.tier === "working" && s.tool ? T().status[s.tier] + " · " + s.tool : T().status[s.tier]);
       } else {
-        if (!S.sleeping) toState();
+        if (!S.sleeping && !dragActive) toState();
         if (!s.chatBusy) hideBubble();
       }
     }
     if (s.flash !== S.flash) {
       S.flash = s.flash;
       if (s.flash) {
-        if (!S.sleeping) play(workClip(s.flash), { onEnded: toState });
+        if (!S.sleeping && !dragActive) play(workClip(s.flash), { onEnded: toState });
         bubble(T().status[s.flash], 3000);
-      } else if (!S.sleeping) toState();
+      } else if (!S.sleeping && !dragActive) toState();
     }
     if (s.chatBusy !== S.chatBusy) {
       S.chatBusy = !!s.chatBusy;
       if (S.chatBusy) {
-        if (!S.tier && !S.flash && !S.sleeping) play(workClip("thinking"), { loop: true });
-      } else if (!S.sleeping) toState();
+        if (!S.tier && !S.flash && !S.sleeping && !dragActive) play(workClip("thinking"), { loop: true });
+      } else if (!S.sleeping && !dragActive) toState();
     }
     if (s.notice && s.notice.at > S.lastNoticeAt) { S.lastNoticeAt = s.notice.at; bubble(s.notice.text, 3200); }
     if (s.chatFail && s.chatFail.at > S.lastChatFailAt) { S.lastChatFailAt = s.chatFail.at; bubble(T().bubbles.chatFallback, 3500); }
@@ -616,14 +619,14 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
       else {
         bubble((s.murmur.text || "……").slice(0, 60) || "……", 6000);
         var cue = (s.murmur.cue && A[s.murmur.cue]) ? s.murmur.cue : pick(POOLS.whisper);
-        if (!S.sleeping) play(cue, { onEnded: toState });
+        if (!S.sleeping && !dragActive) play(cue, { onEnded: toState });
       }
     }
     if (s.balance && s.balance.at > S.lastBalanceAt) {
       S.lastBalanceAt = s.balance.at;
       bubble(s.balance.text, 5000);
       var bi = Math.max(0, Math.min(5, s.balance.idx | 0));
-      if (!S.sleeping && A[POOLS.balance[bi]]) play(POOLS.balance[bi], { onEnded: toState });
+      if (!S.sleeping && !dragActive && A[POOLS.balance[bi]]) play(POOLS.balance[bi], { onEnded: toState });
     }
     if (s.contractSay && s.contractSay.at > S.lastContractAt) {
       S.lastContractAt = s.contractSay.at;
@@ -632,7 +635,7 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     }
     if (s.contractPlay && s.contractPlay.at > S.lastContractAt) {
       S.lastContractAt = s.contractPlay.at;
-      if (!S.sleeping && A[s.contractPlay.name]) play(s.contractPlay.name, { onEnded: toState });
+      if (!S.sleeping && !dragActive && A[s.contractPlay.name]) play(s.contractPlay.name, { onEnded: toState });
     }
     if (s.nameResult && s.nameResult.at > S.lastNameAt) {
       S.lastNameAt = s.nameResult.at;
@@ -1762,6 +1765,95 @@ function fishOverlayMain(ctx) {
         if (win && !win.isDestroyed()) win.webContents.send("fish-pet:motion", { kind });
       } catch {}
     };
+    const stageGeom = () => {
+      // 与页 setSize 同式的镜像：舞台宽来自 server state width（120..320），窗口内水平居中、距窗底 10px
+      const c = Math.max(120, Math.min(320, Math.round(st && typeof st.width === "number" ? st.width : 200)));
+      return { c, sh: Math.round((c * 9) / 16) };
+    };
+
+    // ---------- 真实显示矩形并集几何：外接大矩形包含无显示 void，不再作为可落/可飞区域 ----------
+    // 不变量：鱼身（stage）与真实并集外缘保持 8px 余量 ⟺ dilate(stage, 8) ⊆ raw display 并集。
+    // 用原始 bounds 判覆盖（不逐屏内缩——那会在相邻屏间造 16px 假 void 把接缝变墙）；
+    // 相邻屏共享覆盖范围内跨屏自由，只有真实并集暴露的边缘碰撞；负 origin/混排/scale 天然支持。
+    const DISPLAY_MARGIN = 8; // 鱼身与暴露边缘的余量（窗口版同值）
+    const displayRects = () => {
+      try {
+        return electron.screen.getAllDisplays().map((d) => ({
+          l: d.bounds.x,
+          t: d.bounds.y,
+          r: d.bounds.x + d.bounds.width,
+          b: d.bounds.y + d.bounds.height,
+        }));
+      } catch {
+        return [];
+      }
+    };
+    const stageAt = (x, y, ww, wh, c, sh) => ({
+      l: x + (ww - c) / 2,
+      r: x + (ww - c) / 2 + c,
+      t: y + wh - 10 - sh,
+      b: y + wh - 10,
+    });
+    const stageFits = (x, y, ww, wh, c, sh, rects) => {
+      const s = stageAt(x, y, ww, wh, c, sh);
+      return coveredByRaw({ l: s.l - DISPLAY_MARGIN, t: s.t - DISPLAY_MARGIN, r: s.r + DISPLAY_MARGIN, b: s.b + DISPLAY_MARGIN }, rects);
+    };
+    // 精确覆盖判定：目标矩形边与相交 display 边切成 elementary cells，逐 cell 中点被任一 display 覆盖
+    // 即整块覆盖（display 边全是断点，cell 内无边界穿越，中点代表性成立）。双屏开销极小。
+    const coveredByRaw = (s, rects) => {
+      if (!rects.length) return false;
+      const xs = [s.l, s.r];
+      const ys = [s.t, s.b];
+      for (const r of rects) {
+        if (r.r <= s.l || r.l >= s.r || r.b <= s.t || r.t >= s.b) continue; // 不相交不切
+        xs.push(Math.max(r.l, s.l), Math.min(r.r, s.r));
+        ys.push(Math.max(r.t, s.t), Math.min(r.b, s.b));
+      }
+      xs.sort((a, b) => a - b);
+      ys.sort((a, b) => a - b);
+      for (let i = 0; i + 1 < xs.length; i++) {
+        if (xs[i + 1] - xs[i] < 1e-9) continue;
+        for (let j = 0; j + 1 < ys.length; j++) {
+          if (ys[j + 1] - ys[j] < 1e-9) continue;
+          const cx = (xs[i] + xs[i + 1]) / 2;
+          const cy = (ys[j] + ys[j + 1]) / 2;
+          if (!rects.some((r) => r.l <= cx && cx <= r.r && r.t <= cy && cy <= r.b)) return false;
+        }
+      }
+      return true;
+    };
+    // stage 已落 void（拔屏/改分辨率）：把 dilate(stage) 投影到最近的能容纳它的 display 内（距离最小）
+    const projectStage = (x, y, ww, wh, c, sh, rects) => {
+      const s = stageAt(x, y, ww, wh, c, sh);
+      const q = { l: s.l - DISPLAY_MARGIN, t: s.t - DISPLAY_MARGIN, r: s.r + DISPLAY_MARGIN, b: s.b + DISPLAY_MARGIN };
+      const w = q.r - q.l;
+      const h = q.b - q.t;
+      let best = null;
+      let bestD = Infinity;
+      for (const r of rects) {
+        if (r.r - r.l < w || r.b - r.t < h) continue; // 该 display 装不下
+        const l = clamp(q.l, r.l, r.r - w);
+        const t = clamp(q.t, r.t, r.b - h);
+        const d = (l - q.l) * (l - q.l) + (t - q.t) * (t - q.t);
+        if (d < bestD) {
+          bestD = d;
+          best = { x: l + DISPLAY_MARGIN - (ww - c) / 2, y: t + DISPLAY_MARGIN - (wh - 10 - sh) };
+        }
+      }
+      return best;
+    };
+    // 无效轴贴边：在 [from, to]（from 有效、to 无效，≤12px 亚步内，方向无关）二分最大有效点，鱼吻真实边界
+    const clampAxis = (from, to, fits) => {
+      let lo = from;
+      let hi = to;
+      while (Math.abs(hi - lo) > 0.25) {
+        const mid = (lo + hi) / 2;
+        if (fits(mid)) lo = mid;
+        else hi = mid;
+      }
+      return lo;
+    };
+    // 拖动不把 stage 带进 void：只放行被覆盖的候选位（从 void 只能拖回有效区，不能更深入）
     const dragTick = () => {
       if (!win || win.isDestroyed() || !motion || motion.phase !== "drag") {
         sendMotion("land"); // 异常态收摊：让页面回 state（win 已毁时 sendMotion 自身守卫为 no-op）
@@ -1769,9 +1861,18 @@ function fishOverlayMain(ctx) {
       }
       try {
         const c = electron.screen.getCursorScreenPoint();
+        const rects = displayRects();
+        let ww = 360;
+        let wh = 240;
+        try {
+          const sz = win.getSize();
+          ww = sz[0];
+          wh = sz[1];
+        } catch {}
+        const { c: sc, sh } = stageGeom();
         const x = Math.round(c.x - motion.grabX);
         const y = Math.round(c.y - motion.grabY);
-        if (x !== motion.lastSetX || y !== motion.lastSetY) {
+        if (rects.length && stageFits(x, y, ww, wh, sc, sh, rects) && (x !== motion.lastSetX || y !== motion.lastSetY)) {
           motion.lastSetX = x;
           motion.lastSetY = y;
           win.setPosition(x, y);
@@ -1783,11 +1884,6 @@ function fishOverlayMain(ctx) {
         stopMotion();
       }
     };
-    const stageGeom = () => {
-      // 与页 setSize 同式的镜像：舞台宽来自 server state width（120..320），窗口内水平居中、距窗底 10px
-      const c = Math.max(120, Math.min(320, Math.round(st && typeof st.width === "number" ? st.width : 200)));
-      return { c, sh: Math.round((c * 9) / 16) };
-    };
     const throwTick = () => {
       if (!win || win.isDestroyed() || !motion || motion.phase !== "throw") {
         sendMotion("land"); // 异常态收摊：让页面回 state（win 已毁时为 no-op）
@@ -1796,31 +1892,10 @@ function fishOverlayMain(ctx) {
       const now = Date.now();
       const dt = Math.min(0.05, (now - motion.last) / 1000); // 窗口版同 clamp：防后台巨步
       motion.last = now;
-      motion.vy += 1600 * dt; // g
-      motion.x += motion.vx * dt;
-      motion.y += motion.vy * dt;
-      // 虚拟桌面外包并集（每帧重算少量 displays：插拔/分辨率/缩放变化即时生效；负 origin 天然支持）。
-      // 注意是所有 display bounds 的外框，不是任何单屏，屏幕接缝不反弹。
-      let displays = [];
-      try {
-        displays = electron.screen.getAllDisplays();
-      } catch {
-        sendMotion("land");
-        return stopMotion();
-      }
-      if (!displays.length) {
+      const rects = displayRects();
+      if (!rects.length) {
         sendMotion("land"); // 空显示器列表：停且通知，页面不留 drag 片
         return stopMotion();
-      }
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (const d of displays) {
-        minX = Math.min(minX, d.bounds.x);
-        minY = Math.min(minY, d.bounds.y);
-        maxX = Math.max(maxX, d.bounds.x + d.bounds.width);
-        maxY = Math.max(maxY, d.bounds.y + d.bounds.height);
       }
       let ww = 360;
       let wh = 240;
@@ -1829,37 +1904,83 @@ function fishOverlayMain(ctx) {
         ww = s[0];
         wh = s[1];
       } catch {} // getSize 失败用窗口标称尺寸兜底
-      const { c, sh } = stageGeom();
-      const m = 8; // 边缘余量（窗口版同值）：鱼身贴外缘
-      const offL = (ww - c) / 2; // 舞台左缘距窗口左
-      const offTop = wh - 10 - sh; // 舞台顶距窗口顶
-      const offBot = wh - 10; // 舞台底距窗口顶
-      // 墙作用在舞台矩形上、以窗口 top-left 表达；窗口透明边可越出桌面，视觉上鱼贴缘
-      if (motion.x < minX + m - offL) {
-        motion.x = minX + m - offL;
-        motion.vx = Math.abs(motion.vx) * 0.72;
-      }
-      if (motion.x > maxX - m - offL - c) {
-        motion.x = maxX - m - offL - c;
-        motion.vx = -Math.abs(motion.vx) * 0.72;
-      }
-      if (motion.y < minY + m - offTop) {
-        motion.y = minY + m - offTop;
-        motion.vy = Math.abs(motion.vy) * 0.72 * 0.5; // 顶边阻尼（窗口版同）
-      }
-      const floor = maxY - m - offBot;
-      if (motion.y >= floor) {
-        motion.y = floor;
-        if (Math.abs(motion.vy) > 240) {
-          motion.vy = -Math.abs(motion.vy) * 0.72;
-        } else {
-          motion.vy = 0;
-          motion.vx *= 0.86; // 地面摩擦（窗口版逐帧同值）
-          if (Math.abs(motion.vx) < 24) {
-            sendMotion("land"); // 落地：通知页 squash/toState
-            return stopMotion();
-          }
+      const { c: sc, sh } = stageGeom();
+      const fits = (x, y) => stageFits(x, y, ww, wh, sc, sh, rects);
+      // 拔屏/改分辨率后当前位置已落 void：投影到最近有效位并安全落地，绝不停留在 void
+      if (!fits(motion.x, motion.y)) {
+        const proj = projectStage(motion.x, motion.y, ww, wh, sc, sh, rects);
+        if (proj) {
+          motion.x = proj.x;
+          motion.y = proj.y;
+          try {
+            const rx = Math.round(motion.x);
+            const ry = Math.round(motion.y);
+            if (rx !== motion.lastSetX || ry !== motion.lastSetY) {
+              motion.lastSetX = rx;
+              motion.lastSetY = ry;
+              win.setPosition(rx, ry);
+            }
+          } catch {}
         }
+        sendMotion("land");
+        return stopMotion();
+      }
+      // substeps 防高速隧穿：每步位移 ≤12px，封顶 40 步防病理开销；dt/g/rest 参数不变
+      const frameD = Math.max(Math.abs(motion.vx * dt), Math.abs(motion.vy * dt) + 800 * dt * dt);
+      const steps = Math.max(1, Math.min(40, Math.ceil(frameD / 12)));
+      const sdt = dt / steps;
+      let landed = false;
+      for (let i = 0; i < steps && !landed; i++) {
+        motion.vy += 1600 * sdt; // g
+        const nx = motion.x + motion.vx * sdt;
+        const ny = motion.y + motion.vy * sdt;
+        if (fits(nx, ny)) {
+          motion.x = nx;
+          motion.y = ny;
+          continue;
+        }
+        const hOK = fits(nx, motion.y);
+        const vOK = fits(motion.x, ny);
+        if (hOK && vOK) {
+          // 双单轴有效但对角无效（并集非凸角）：撤销两轴，各按对应墙反弹
+          motion.vx = -Math.sign(motion.vx) * Math.abs(motion.vx) * 0.72;
+          if (motion.vy > 0) {
+            if (Math.abs(motion.vy) > 240) motion.vy = -Math.abs(motion.vy) * 0.72;
+            else {
+              motion.vy = 0;
+              motion.vx *= 0.86;
+              if (Math.abs(motion.vx) < 24) landed = true;
+            }
+          } else {
+            motion.vy = Math.abs(motion.vy) * 0.72 * 0.5;
+          }
+          continue;
+        }
+        if (hOK) motion.x = nx;
+        else {
+          // 侧墙/void：贴边 + 水平反弹（窗口版 rest 同值）
+          motion.x = clampAxis(motion.x, nx, (xx) => fits(xx, motion.y));
+          motion.vx = -Math.sign(motion.vx) * Math.abs(motion.vx) * 0.72;
+        }
+        if (fits(motion.x, ny)) motion.y = ny; // 水平贴边后用新 x 复验，避免旧 vOK 把鱼带入凹口 void
+        else if (motion.vy > 0) {
+          // 下边界（地面）：贴地；高速反弹（窗口版 |vy|>240），低速摩擦滑停
+          motion.y = clampAxis(motion.y, ny, (yy) => fits(motion.x, yy));
+          if (Math.abs(motion.vy) > 240) motion.vy = -Math.abs(motion.vy) * 0.72;
+          else {
+            motion.vy = 0;
+            motion.vx *= 0.86; // 地面摩擦（窗口版逐帧同值）
+            if (Math.abs(motion.vx) < 24) landed = true;
+          }
+        } else {
+          // 上边界阻尼（窗口版顶墙同参）
+          motion.y = clampAxis(motion.y, ny, (yy) => fits(motion.x, yy));
+          motion.vy = Math.abs(motion.vy) * 0.72 * 0.5;
+        }
+      }
+      if (landed) {
+        sendMotion("land"); // 落地：通知页 squash/toState
+        return stopMotion();
       }
       try {
         const rx = Math.round(motion.x);
@@ -1987,8 +2108,14 @@ function fishOverlayMain(ctx) {
             log("warn", "settings rpc unavailable", { field });
           }
         } else if (cmd === "bigger" || cmd === "smaller") {
+          // 舞台视觉封顶 320（页 setSize 同钳制）：已达上限不再写共享 width——
+          // 不把 340/360 顶上去（窗口端设的更大值保持原样），也绝不因钳制反向缩小
           const cur = st && typeof st.width === "number" ? st.width : 200;
-          const next = clamp(cur + (cmd === "bigger" ? 20 : -20), 120, 360);
+          if (cmd === "bigger" && cur >= 320) {
+            log("info", "bigger ignored: overlay stage capped at 320", { cur });
+            return;
+          }
+          const next = clamp(cmd === "bigger" ? Math.min(cur + 20, 320) : cur - 20, 120, 360);
           const rpc = rpcNow();
           if (rpc?.settings) {
             void rpc
@@ -2073,6 +2200,33 @@ function fishOverlayMain(ctx) {
             clearInterval(motion.timer);
           } catch {}
           motion.timer = 0;
+          // 释放时不能从 void 起飞：当前位置无效（拔屏/改分辨率）→ 投影最近有效位并 land
+          let ww = 360;
+          let wh = 240;
+          try {
+            const sz = win.getSize();
+            ww = sz[0];
+            wh = sz[1];
+          } catch {}
+          const { c: sc, sh } = stageGeom();
+          const rectsNow = displayRects();
+          if (!stageFits(motion.lastSetX, motion.lastSetY, ww, wh, sc, sh, rectsNow)) {
+            const proj = projectStage(motion.lastSetX, motion.lastSetY, ww, wh, sc, sh, rectsNow);
+            if (proj) {
+              try {
+                const rx = Math.round(proj.x);
+                const ry = Math.round(proj.y);
+                if (rx !== motion.lastSetX || ry !== motion.lastSetY) {
+                  motion.lastSetX = rx;
+                  motion.lastSetY = ry;
+                  win.setPosition(rx, ry);
+                }
+              } catch {}
+            }
+            sendMotion("land");
+            stopMotion();
+            return;
+          }
           const s1 = motion.samples[0];
           const s2 = motion.samples[motion.samples.length - 1];
           let vx = 0;
@@ -2623,7 +2777,7 @@ module.exports.default = Plugin.define((() => {
 
         hit.addEventListener("pointerdown", (e) => {
           if (e.button === 2) return;
-          hit.setPointerCapture(e.pointerId);
+          try { hit.setPointerCapture(e.pointerId); } catch { return; } // capture 失败：状态尚未置位，直接不进手势
           state.dragging = true;
           state.gen++;
           cancelAnimationFrame(state.raf);
@@ -2652,6 +2806,7 @@ module.exports.default = Plugin.define((() => {
           };
           const up = (ev) => {
             hit.removeEventListener("pointermove", move);
+            hit.removeEventListener("pointercancel", cancel); // 本手势已终态：摘掉未触发的 cancel，防迟到触发旧闭包
             state.dragging = false;
             hit.classList.remove("fish-drag");
             const dx = ev.clientX - start.px;
@@ -2682,9 +2837,29 @@ module.exports.default = Plugin.define((() => {
             if (reduced() || (Math.abs(vx) < 90 && Math.abs(vy) < 90)) return land();
             throwFish(vx, vy, false);
           };
+          // pointercancel 独立收尾：不走释放（无 click poke、无惯性/弹弓抛出）；
+          // armed 安全复位，摘掉本手势监听（含未触发的 once up），恢复状态链。
+          // 本手势的 pointerdown 已 cancelAnimationFrame 掐断飞行/行走循环（throwFish/walkStep 置位的
+          // busy 遗留给打断方，同 walkStep.finish 的约定）：cancel 不走 land，须显式归还 busy 并归零句柄，
+          // 否则 rollNext 永远 4s 短续、工作/状态动画被旧 busy 抑制
+          const cancel = () => {
+            hit.removeEventListener("pointermove", move);
+            hit.removeEventListener("pointerup", up);
+            state.dragging = false;
+            state.busy = false; // 飞行/行走中抓住后取消：归还打断的 busy
+            state.raf = 0; // raf 已在 pointerdown 取消，归零防悬空（与 land()/walkStep.finish 同款）
+            hit.classList.remove("fish-drag");
+            if (state.armed) {
+              clearTimeout(state.disarmTimer);
+              disarm();
+              inner.style.transform = ""; // 瞄准偏移还原（与正常 armed 释放同款）
+            }
+            if (!state.sleeping && !shared.work && !shared.flash) toIdle();
+            scheduleRoll();
+          };
           hit.addEventListener("pointermove", move);
           hit.addEventListener("pointerup", up, { once: true });
-          hit.addEventListener("pointercancel", up, { once: true });
+          hit.addEventListener("pointercancel", cancel, { once: true });
         });
 
         hit.addEventListener("dblclick", () => {

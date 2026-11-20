@@ -414,7 +414,9 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
       closeMenu();
       try { fishIpc.send("murmurGate", S.whisper === false); } catch (err) {}
     });
-    appendItem(T().menu.bigger, function () { closeMenu(); try { fishIpc.send("bigger"); } catch (err) {} });
+    // 大一点：舞台视觉封顶 320（与 setSize 同钳制）——已达上限直接不给可点的无效入口
+    var cw = Math.max(120, Math.min(320, Math.round(S.width) || 200));
+    if (cw < 320) appendItem(T().menu.bigger, function () { closeMenu(); try { fishIpc.send("bigger"); } catch (err) {} });
     appendItem(T().menu.smaller, function () { closeMenu(); try { fishIpc.send("smaller"); } catch (err) {} });
     appendItem(T().menu.quit, function () { closeMenu(); try { fishIpc.send("quit"); } catch (err) {} });
     appendItem(T().menu.lang, function () { buildLangPage(e); });
@@ -455,7 +457,8 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     document.addEventListener("pointerdown", onMenuAway, true);
   });
 
-  // ---- 状态应用：tier/flash 先落地，一次性通道最后播；睡觉时只留气泡不打断睡觉链 ----
+  // ---- 状态应用：tier/flash 先落地，一次性通道最后播；睡觉时只留气泡不打断睡觉链；
+  // 拖动中同理只更新数据与气泡，播片/toState 不抢 names.drag 循环片（land 后按最新状态恢复） ----
   function apply(s) {
     if (!s) return;
     if (typeof s.lang === "string" && STR[s.lang]) lang = s.lang;
@@ -467,25 +470,25 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     if (s.tier !== S.tier) {
       S.tier = s.tier;
       if (s.tier) {
-        if (!S.sleeping) play(workClip(s.tier), { loop: true });
+        if (!S.sleeping && !dragActive) play(workClip(s.tier), { loop: true });
         bubble(s.tier === "working" && s.tool ? T().status[s.tier] + " · " + s.tool : T().status[s.tier]);
       } else {
-        if (!S.sleeping) toState();
+        if (!S.sleeping && !dragActive) toState();
         if (!s.chatBusy) hideBubble();
       }
     }
     if (s.flash !== S.flash) {
       S.flash = s.flash;
       if (s.flash) {
-        if (!S.sleeping) play(workClip(s.flash), { onEnded: toState });
+        if (!S.sleeping && !dragActive) play(workClip(s.flash), { onEnded: toState });
         bubble(T().status[s.flash], 3000);
-      } else if (!S.sleeping) toState();
+      } else if (!S.sleeping && !dragActive) toState();
     }
     if (s.chatBusy !== S.chatBusy) {
       S.chatBusy = !!s.chatBusy;
       if (S.chatBusy) {
-        if (!S.tier && !S.flash && !S.sleeping) play(workClip("thinking"), { loop: true });
-      } else if (!S.sleeping) toState();
+        if (!S.tier && !S.flash && !S.sleeping && !dragActive) play(workClip("thinking"), { loop: true });
+      } else if (!S.sleeping && !dragActive) toState();
     }
     if (s.notice && s.notice.at > S.lastNoticeAt) { S.lastNoticeAt = s.notice.at; bubble(s.notice.text, 3200); }
     if (s.chatFail && s.chatFail.at > S.lastChatFailAt) { S.lastChatFailAt = s.chatFail.at; bubble(T().bubbles.chatFallback, 3500); }
@@ -495,14 +498,14 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
       else {
         bubble((s.murmur.text || "……").slice(0, 60) || "……", 6000);
         var cue = (s.murmur.cue && A[s.murmur.cue]) ? s.murmur.cue : pick(POOLS.whisper);
-        if (!S.sleeping) play(cue, { onEnded: toState });
+        if (!S.sleeping && !dragActive) play(cue, { onEnded: toState });
       }
     }
     if (s.balance && s.balance.at > S.lastBalanceAt) {
       S.lastBalanceAt = s.balance.at;
       bubble(s.balance.text, 5000);
       var bi = Math.max(0, Math.min(5, s.balance.idx | 0));
-      if (!S.sleeping && A[POOLS.balance[bi]]) play(POOLS.balance[bi], { onEnded: toState });
+      if (!S.sleeping && !dragActive && A[POOLS.balance[bi]]) play(POOLS.balance[bi], { onEnded: toState });
     }
     if (s.contractSay && s.contractSay.at > S.lastContractAt) {
       S.lastContractAt = s.contractSay.at;
@@ -511,7 +514,7 @@ const FISH_OVERLAY_PAGE_JS = String.raw`
     }
     if (s.contractPlay && s.contractPlay.at > S.lastContractAt) {
       S.lastContractAt = s.contractPlay.at;
-      if (!S.sleeping && A[s.contractPlay.name]) play(s.contractPlay.name, { onEnded: toState });
+      if (!S.sleeping && !dragActive && A[s.contractPlay.name]) play(s.contractPlay.name, { onEnded: toState });
     }
     if (s.nameResult && s.nameResult.at > S.lastNameAt) {
       S.lastNameAt = s.nameResult.at;
