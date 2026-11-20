@@ -4,7 +4,7 @@
 // 通道事实（均已核对源码）：session.prompt/create 走 data 解包；message.list {data,cursor} 带 order:desc；
 // attention.notify 点击固定打开 session；Contract id 必须是本插件 id。
 
-const { Plugin, Style, Slot, Panel, Store, Contract, Ipc } = require("@opencode/plugin/gui");
+const { Plugin, Style, Slot, Panel, Store, Contract } = require("@opencode/plugin/gui");
 
 let Schema = undefined;
 try {
@@ -153,7 +153,7 @@ const textOf = (m) => {
 };
 
 
-// server 脑契约的纯 JS 拷贝（与插件目录 rpc.ts 同形：id+events 定订阅 type，methods 定调用名）
+// 窗口用到的 server 契约（对应 rpc.ts：id+events 定订阅 type，methods 定调用名）
 const FishStateDef = {
   id: "fish-pet",
   methods: {
@@ -168,53 +168,10 @@ const FishStateDef = {
     balance: { input: { type: "object", properties: { force: { type: "boolean" } }, required: ["force"], additionalProperties: false } },
     language: { input: { type: "object", properties: { lang: { enum: ["zh", "en", "ja"] } }, required: ["lang"], additionalProperties: false } },
     settings: { input: { type: "object", additionalProperties: false } },
-    presence: { input: { type: "object", properties: { sleeping: { type: "boolean" } }, required: ["sleeping"], additionalProperties: false } },
     resetBrain: { input: { type: "object", additionalProperties: false } },
   },
   events: { state: { schema: { type: "object" } } },
 };
-
-// ---------- 桌外 overlay 的 main↔窗口 IPC 契约（id 必须在本插件 id 之下）----------
-// mode 三态：off=窗口内鱼（默认/回退）；pending=overlay 启动中（窗口先别挂鱼）；active=桌外鱼已就绪。
-// main → 窗口：state 推送（mode + 桌外睡眠态）+ active 事件 + chat 事件（开聊定向到聚焦窗口）。
-// 窗口 → main：mode()（非 reactive 初读）、setLang（兼容入口）、report（窗口鱼挂载状态）、
-// contract（窗口 Contract 的 say/play 在 overlay active 时转发到桌外身体）。
-// Schema 缺席（旧宿主）或 Ipc 缺席时整个 overlay 特性不启用：main 不 provide → 窗口 ctx.main 调用
-// reject → setup 兜底挂窗口内鱼，行为与旧版完全一致。
-const FishOverlayMode = () =>
-  Schema && Ipc
-    ? Ipc.define({
-        id: "fish-pet.overlay",
-        state: Schema.Struct({ mode: Schema.String, sleeping: Schema.optional(Schema.Boolean) }),
-        methods: {
-          mode: { output: Schema.Struct({ mode: Schema.String, sleeping: Schema.optional(Schema.Boolean) }) },
-          setLang: { input: Schema.Struct({ lang: Schema.String }) },
-          report: { input: Schema.Struct({ hasFish: Schema.Boolean }) },
-          // 文本录入路由回包：窗口 dialog 完成（ok+text）或取消（ok=false，静默）
-          promptResult: {
-            input: Schema.Struct({
-              kind: Schema.String,
-              text: Schema.optional(Schema.String),
-              ok: Schema.optional(Schema.Boolean),
-            }),
-          },
-          contract: {
-            input: Schema.Struct({
-              kind: Schema.String,
-              text: Schema.optional(Schema.String),
-              name: Schema.optional(Schema.String),
-            }),
-          },
-        },
-        events: {
-          active: Schema.Struct({ mode: Schema.String, sleeping: Schema.optional(Schema.Boolean) }),
-          chat: Schema.Struct({}),
-          // main → 定向窗口：打开宿主 dialog 收文本（todo/name），窗口回 promptResult
-          prompt: Schema.Struct({ kind: Schema.String }),
-        },
-      })
-    : null;
-const FishOverlayDef = FishOverlayMode();
 
 function ensureAlphaFix() {
   if (document.getElementById("fish-alpha-fix")) return null;
@@ -269,1403 +226,6 @@ const buildPrefs = () => {
   }
 };
 
-// =========================================================
-// 桌外 overlay main（Electron 主进程，app-scoped 单例；Web 永不运行）
-// - 凭据/RPC 只留在 main：页面只能收到显示状态（tier/flash/notice/碎碎念/余额文案）与素材 data URI
-// - Desktop 默认启用（旧 options.overlay 字段被忽略，无 schema 拒绝）；
-//   Electron/Ipc 能力缺失、文件/窗口创建/加载/show 失败仍回退窗口内鱼
-// - 不依赖 Wayland 不可信的 setPosition/getBounds：窗口位置交给 Sway 浮动 con（app-region/Sway 拖拽）
-// =========================================================
-function fishOverlayMain(ctx) {
-  // 旧宿主（无 Ipc/Schema）或宿主未提供 log/windows/provide：直接不做，窗口侧自行兜底
-  if (!FishOverlayDef) return;
-  if (!ctx.provide || !ctx.windows) return;
-  const debug = !!(ctx.options && ctx.options.overlayDebug);
-  const evidenceDir = "/tmp/opencode/fish-pet-overlay-mvp";
-  const evidence = debug ? evidenceDir + "/evidence.jsonl" : null;
-  const log = (level, message, data) => {
-    try {
-      ctx.log.write(level, "fish-pet overlay: " + message, data || {});
-    } catch {
-      /* 旧宿主无 log */
-    }
-    if (evidence) {
-      try {
-        require("node:fs").mkdirSync(evidenceDir, { recursive: true });
-        require("node:fs").appendFileSync(
-          evidence,
-          JSON.stringify(Object.assign({ t: new Date().toISOString(), level, message }, data || {})) + "\n",
-        );
-      } catch {
-        /* 证据失败不影响功能 */
-      }
-    }
-  };
-
-  // Desktop 默认启用 overlay：旧 options.overlay 字段被 host 透传但本插件彻底忽略（Record<string,unknown>，无 schema 拒绝）
-  let mode = "pending";
-  let langPref = "en";
-  let win = null;
-  let loaded = false;
-  let provider = null;
-  let fishSid = null;
-  let st = null; // 最近一次 server state 快照
-  let murmurNow = null;
-  let balanceNow = null;
-  let chatFailNow = null;
-  let contractSayNow = null; // 窗口 Contract.say 转发（overlay active 时）
-  let contractPlayNow = null; // 窗口 Contract.play 转发
-  let nameResultNow = null;
-  let resetResultNow = null;
-  let actionResultNow = null; // 统一真实结果通道：todoAdd/todoClear/notify/whisper/width/prompt
-  let overlaySleeping = false; // 桌外身体的睡眠态：页面 cmd sleep 是唯一来源，presence 上报 server
-  let chatBusy = false; // 鱼会话执行中：execution.started→true / 终态→false，页内 thinking 反馈
-  let cmdHandler = null;
-  let balanceTimer = 0;
-  let watchdogTimer = 0;
-  let heartbeatTimer = 0;
-  let presenceTimer = 0;
-  let busyWatchdogTimer = 0; // chatBusy 看门狗（与窗口版同量级 90s）：丢终态事件也不卡死 thinking
-  let prefetchTimers = [];
-  let execRetryTimer = 0;
-  let execWaitResolve = null;
-  let execStopped = true; // watchExec 启动后翻 false；cleanup 置回 true 终止循环
-  let overlayDir = null;
-  let cleaned = false;
-  let sawMainWindow = false; // 启动门控：见过至少一个主窗口后才允许"最后一个主窗口关闭→退出"
-  let windowsCloseUnsub = null; // ctx.windows.on("close") 返回的 Cleanup
-  let windowsOpenUnsub = null; // ctx.windows.on("open") 返回的 Cleanup
-  let motion = null; // win32 拖动/惯性引擎状态：{phase:"drag"|"throw", timer, ...}；仅 drag/throw 期间存在，无常驻轮询
-  // 中心收摊：一切终态（释放/落地/cancel/抢占/退出/cleanup）都走这里，杜绝旧循环竞争
-  const stopMotion = () => {
-    if (motion && motion.timer) {
-      try {
-        clearInterval(motion.timer);
-      } catch {}
-    }
-    motion = null;
-  };
-
-  // 逐次读取 client（官方约定：server 重启后 ctx.client 是新对象，旧 client 调用只会一直拒绝）
-  const rpcNow = () => {
-    try {
-      return ctx.client?.rpc ? ctx.client.rpc(FishStateDef) : null;
-    } catch {
-      return null;
-    }
-  };
-
-  // ---------- state listener 生命周期（顶层作用域：cleanup 可摘） ----------
-  const syncFromSnapshot = (s) => {
-    st = s || null;
-    // 语言长期来源是 server 权威（state.lang）：不再以固定 en 兜底；旧 server 无该字段时保留现值
-    if (st && typeof st.lang === "string" && FISH_OVERLAY_PAGE_STR[st.lang] && st.lang !== langPref) {
-      log("info", "lang authority change", { from: langPref, to: st.lang });
-      langPref = st.lang;
-    }
-    // 重置鱼脑后 server 发 null sessionID：跟着清空；换会话也随快照同步
-    fishSid = st && typeof st.sessionID === "string" ? st.sessionID : null;
-    push();
-  };
-  const onStateEvent = (ev) => syncFromSnapshot(ev && ev.data);
-  let stateOff = null; // 当前 state listener 的摘除函数
-  let stateClient = undefined; // listener 所骑的 ctx.client（undefined = 未挂）
-  const detachStateListener = () => {
-    if (stateOff) {
-      try {
-        stateOff();
-      } catch {}
-      stateOff = null;
-    }
-    stateClient = undefined;
-  };
-  const attachStateListener = (client) => {
-    detachStateListener(); // 先摘旧：重连后绝不累积重复 listener
-    try {
-      const r = client && client.rpc ? client.rpc(FishStateDef) : null;
-      if (!r) throw new Error("rpc unavailable");
-      stateOff = r.events.on("state", onStateEvent, { signal: ctx.signal });
-      stateClient = client;
-    } catch (cause) {
-      log("warn", "state subscribe failed", { error: String(cause) });
-    }
-  };
-
-  // 余额聚合（与窗口版同语义）：client 逐次读取（rpcNow），server 重启后自动用新 client
-  const runBalance = async (force) => {
-    const rpc = rpcNow();
-    if (!rpc) return;
-    let out = null;
-    try {
-      out = await rpc.balance({ force });
-    } catch {
-      return;
-    }
-    const rows = out && Array.isArray(out.results) ? out.results : [];
-    let worst = -1;
-    let report = "";
-    let bad = null;
-    for (const r of rows) {
-      if (!r || typeof r.name !== "string") continue;
-      if (r.error) {
-        bad = bad ?? (r.error === "unauthorized" ? "unauthorized" : "other");
-        continue;
-      }
-      if (typeof r.remaining !== "number" || typeof r.total !== "number" || !(r.total > 0)) continue;
-      const pct = clamp(100 * (1 - r.remaining / r.total), 0, 100);
-      worst = Math.max(worst, pct);
-      const L = STR[slang()];
-      report = report
-        ? report
-        : r.name === "DeepSeek"
-          ? L.balanceReport(r.remaining.toFixed(2))
-          : L.balanceCustom(r.name || L.customName, r.remaining);
-    }
-    if (worst >= 0) {
-      const idx = worst >= 100 ? 5 : Math.floor(worst / 20);
-      balanceNow = { idx, text: STR[slang()].withLabel(report, STR[slang()].balanceLabels[idx]), at: Date.now() };
-      push();
-      log("info", "balance push", { idx });
-    } else if (force) {
-      const L = STR[slang()].bubbles;
-      if (bad === "unauthorized") balanceNow = { idx: 5, text: L.balanceInvalid, at: Date.now() };
-      else if (bad) balanceNow = { idx: 5, text: L.balanceFailed, at: Date.now() };
-      else balanceNow = { idx: 5, text: L.balanceNoKey, at: Date.now() };
-      push();
-    }
-  };
-
-  const slang = () => (langPref in FISH_OVERLAY_PAGE_STR ? langPref : "en");
-  const compact = () => ({
-    lang: slang(),
-    tier: st ? st.tier : null,
-    flash: st ? st.flash : null,
-    tool: st ? st.tool : null,
-    notice: st ? st.notice : null,
-    name: st ? st.name : null,
-    // 共享偏好权威（server settings）：页内菜单标签/尺寸跟随
-    whisper: st && typeof st.whisper === "boolean" ? st.whisper : true,
-    notify: st && typeof st.notify === "boolean" ? st.notify : false,
-    width: st && typeof st.width === "number" ? st.width : 200,
-    // 待办安全投影（server todos）：列表页展示
-    todos: st && Array.isArray(st.todos) ? st.todos : [],
-    chatBusy,
-    murmur: murmurNow,
-    balance: balanceNow,
-    chatFail: chatFailNow,
-    contractSay: contractSayNow,
-    contractPlay: contractPlayNow,
-    nameResult: nameResultNow,
-    resetResult: resetResultNow,
-    actionResult: actionResultNow,
-  });
-  const push = () => {
-    if (cleaned || !loaded || !win || win.isDestroyed()) return;
-    try {
-      win.webContents.send("fish-pet:state", compact());
-    } catch {
-      /* 窗口正在销毁 */
-    }
-  };
-
-  const setMode = (next, why) => {
-    if (next !== "off" && next !== "pending" && next !== "active" && next !== "dismissed") next = "off";
-    if (next === mode) return;
-    mode = next;
-    if (next === "dismissed") {
-      // 用户退出宠物：停掉无意义的心跳/presence/余额定时（窗口已销毁 push 本就空转，这里少发请求）
-      try {
-        if (heartbeatTimer) clearInterval(heartbeatTimer);
-        heartbeatTimer = 0;
-      } catch {}
-      try {
-        if (presenceTimer) clearInterval(presenceTimer);
-        presenceTimer = 0;
-      } catch {}
-      try {
-        if (balanceTimer) clearInterval(balanceTimer);
-        balanceTimer = 0;
-      } catch {}
-    }
-    log("info", "mode", { mode, why: why || "" });
-    pushOverlayState();
-  };
-  // 模式/睡眠态变化统一出口：窗口侧 Contract status 缓存与 UI 都靠它
-  const pushOverlayState = () => {
-    try {
-      provider?.changed();
-      provider?.emit("active", { mode, sleeping: overlaySleeping });
-    } catch {
-      /* 提供器刚回收 */
-    }
-  };
-
-  // ---------- 供 Ipc：先提供（窗口立刻能拿到 off/pending 的确定性答案），再慢启动 ----------
-  try {
-    provider = ctx.provide(FishOverlayDef, {
-      state: () => ({ mode, sleeping: overlaySleeping }),
-      mode: () => ({ mode, sleeping: overlaySleeping }),
-      setLang: (input) => {
-        // 兼容入口（旧窗口）：立即生效并转发给 server language RPC——server 仍是唯一权威，
-        // 新代码路径（窗口菜单/overlay 菜单）都直接走 language RPC，不经过这里
-        if (typeof input.lang !== "string" || !FISH_OVERLAY_PAGE_STR[input.lang]) return;
-        langPref = input.lang;
-        const rpc = rpcNow();
-        if (rpc?.language) {
-          void rpc
-            .language({ lang: input.lang })
-            .then((s) => {
-              if (s) syncFromSnapshot(s); // 返回即最新快照：直接应用（含权威 lang）
-            })
-            .catch(() => {});
-        }
-        push();
-      },
-      report: (input) => {
-        log("info", "window report", { hasFish: !!input.hasFish, mode });
-      },
-      // 窗口 Contract 的 say/play 在 overlay active 时转发到桌外身体（页内睡着回拒绝台词）
-      contract: (input) => {
-        if (mode !== "active") return;
-        const kind = input && typeof input.kind === "string" ? input.kind : "";
-        if (kind === "say") {
-          contractSayNow = { text: String(input.text ?? "").slice(0, 200), at: Date.now() };
-          push();
-          log("info", "contract say forwarded", { len: contractSayNow.text.length });
-        } else if (kind === "play") {
-          const name = typeof input.name === "string" ? input.name : "";
-          if (!ASSETS[name]) {
-            log("warn", "contract play unknown clip", {});
-            return;
-          }
-          contractPlayNow = { name, at: Date.now() };
-          push();
-          log("info", "contract play forwarded", { name: name.length });
-        }
-      },
-      // 窗口 dialog 文本录入回包：ok=false 是用户取消（静默）；ok+text 才调 RPC，结果走真实通道
-      promptResult: (input) => {
-        if (input.ok !== true) return; // 取消：不报失败
-        const kind = input && typeof input.kind === "string" ? input.kind : "";
-        const text = typeof input.text === "string" ? input.text.trim() : "";
-        if (!text) return;
-        if (kind === "todo") {
-          const rpc = rpcNow();
-          if (!rpc?.todoAdd) {
-            actionResultNow = { kind: "todoAdd", ok: false, at: Date.now() };
-            push();
-            return;
-          }
-          void rpc
-            .todoAdd({ text: text.slice(0, 120) })
-            .then(
-              (s) => {
-                actionResultNow = { kind: "todoAdd", ok: !!s, value: text.slice(0, 120), at: Date.now() };
-                if (s) syncFromSnapshot(s);
-                push();
-              },
-              () => {
-                actionResultNow = { kind: "todoAdd", ok: false, value: text.slice(0, 120), at: Date.now() };
-                push();
-              },
-            )
-            .catch(() => {});
-        } else if (kind === "name") {
-          const rpc = rpcNow();
-          if (!rpc?.name) {
-            nameResultNow = { ok: false, name: "", at: Date.now() };
-            push();
-            return;
-          }
-          // server trim 会折叠连续空白：同归一后比较，避免实际成功误报失败
-          const expect = text.slice(0, 24).replace(/\s+/g, " ");
-          void rpc
-            .name({ name: text.slice(0, 24) })
-            .then(
-              (s) => {
-                nameResultNow = { ok: !!(s && typeof s.name === "string" && s.name === expect), name: expect, at: Date.now() };
-                if (s) syncFromSnapshot(s);
-                push();
-                log("info", "name rpc applied", { ok: nameResultNow.ok });
-              },
-              () => {
-                nameResultNow = { ok: false, name: expect, at: Date.now() };
-                push();
-              },
-            )
-            .catch(() => {});
-        }
-      },
-    });
-  } catch (cause) {
-    log("error", "provide failed", { error: String(cause) });
-    return;
-  }
-  log("info", "main setup started", { id: ctx.id, mode, platform: process.platform });
-
-  // ---------- 主窗口生命周期跟随：最后一个主窗口关闭时销毁 overlay，让宿主 window-all-closed 退出继续 ----------
-  // sawMainWindow 门控：启动时 overlay 可能先于第一个主窗口出现，没见过主窗口不触发退出。
-  // 多窗 2→1 不退（list 非空），多窗 1→0 destroy overlay → Electron 计数归零 → app 正常退出。
-  try {
-    const initialList = ctx.windows.list?.() ?? [];
-    if (initialList.length) sawMainWindow = true;
-    windowsOpenUnsub = ctx.windows.on("open", () => {
-      sawMainWindow = true;
-    });
-    windowsCloseUnsub = ctx.windows.on("close", () => {
-      if (cleaned || mode === "dismissed") return;
-      const remaining = ctx.windows.list?.() ?? [];
-      if (sawMainWindow && !remaining.length) {
-        log("info", "last main window closed, destroying overlay", { mode });
-        try {
-          if (win && !win.isDestroyed()) win.destroy();
-        } catch {}
-      }
-    });
-  } catch (cause) {
-    log("warn", "windows lifecycle listener failed", { error: String(cause) });
-  }
-
-  const cleanup = (reason) => {
-    if (cleaned) return;
-    cleaned = true;
-    log("info", "cleanup run", { reason });
-    try {
-      if (watchdogTimer) clearTimeout(watchdogTimer);
-    } catch {}
-    try {
-      if (balanceTimer) clearInterval(balanceTimer);
-    } catch {}
-    try {
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-    } catch {}
-    try {
-      if (presenceTimer) clearInterval(presenceTimer);
-    } catch {}
-    try {
-      if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
-    } catch {}
-    for (const t of prefetchTimers) {
-      try {
-        clearTimeout(t);
-      } catch {}
-    }
-    prefetchTimers = [];
-    try {
-      stopMotion(); // 飞行中插件收摊：帧循环必须随一切终止
-    } catch {}
-    execStopped = true; // 终止 execution 监督循环
-    try {
-      if (execRetryTimer) clearTimeout(execRetryTimer);
-    } catch {}
-    try {
-      execWaitResolve?.(); // 唤醒在重连等待里挂着的循环，让其看到终止条件退出
-    } catch {}
-    detachStateListener();
-    try {
-      if (cmdHandler) require("electron").ipcMain.removeListener("fish-pet:cmd", cmdHandler);
-    } catch {}
-    try {
-      if (windowsCloseUnsub) windowsCloseUnsub();
-    } catch {}
-    try {
-      if (windowsOpenUnsub) windowsOpenUnsub();
-    } catch {}
-    try {
-      if (win && !win.isDestroyed()) win.destroy();
-    } catch {}
-    try {
-      if (overlayDir) require("node:fs").rmSync(overlayDir, { recursive: true, force: true });
-    } catch {}
-    try {
-      provider?.dispose();
-    } catch {}
-  };
-  ctx.onCleanup(() => cleanup("ctx.onCleanup"));
-
-  // ---------- 覆盖窗口（spike 验证过的形态：小尺寸 fixed 透明 → Sway floating_con） ----------
-  void (async () => {
-    let electron = null;
-    try {
-      electron = require("electron");
-    } catch {
-      setMode("off", "electron unavailable");
-      return;
-    }
-    const nodefs = require("node:fs");
-    const nodepath = require("node:path");
-    const nodeos = require("node:os");
-    try {
-      overlayDir = nodefs.mkdtempSync(nodepath.join(nodeos.tmpdir(), "fish-pet-overlay-"));
-      const initialWidth = st && typeof st.width === "number" ? st.width : 200;
-      const initialDrag = process.platform === "win32"; // 仅 win32 用页内拖动；Linux/Wayland 走 WM
-      const composed = composeOverlayHtml(ASSETS, POOLS, CLICK_SOUND, slang(), initialWidth, initialDrag);
-      nodefs.writeFileSync(nodepath.join(overlayDir, "index.html"), composed.html);
-      nodefs.writeFileSync(nodepath.join(overlayDir, "preload.js"), FISH_OVERLAY_PRELOAD_JS);
-      log("info", "overlay files ready", { clips: composed.clips.length, htmlBytes: composed.html.length });
-    } catch (cause) {
-      log("error", "overlay files failed", { error: String(cause) });
-      setMode("off", "files failed");
-      return;
-    }
-
-    try {
-      win = new electron.BrowserWindow({
-        width: 360,
-        height: 240,
-        show: false,
-        frame: false,
-        transparent: true,
-        hasShadow: false,
-        roundedCorners: false,
-        resizable: false,
-        focusable: false,
-        skipTaskbar: true,
-        alwaysOnTop: true,
-        title: "fish-pet",
-        webPreferences: {
-          sandbox: true,
-          contextIsolation: true,
-          nodeIntegration: false,
-          preload: require("node:path").join(overlayDir, "preload.js"),
-        },
-      });
-    } catch (cause) {
-      log("error", "BrowserWindow failed", { error: String(cause) });
-      setMode("off", "window failed");
-      return;
-    }
-    // 小窗整体可交互（不 ignoreMouseEvents）：鱼区点击/菜单在页内；空边由 app-region 拖拽消化，
-    // 或经 Sway $mod+左键直接拖浮动 con。Wayland 下不自作 setPosition。
-    log("info", "BrowserWindow created", { windowId: win.id });
-
-    let shown = false;
-    const presencePing = () => {
-      if (cleaned || mode !== "active") return;
-      const rpc = rpcNow();
-      if (rpc?.presence) {
-        if (debug) log("info", "presence ping", { sleeping: overlaySleeping });
-        void rpc.presence({ sleeping: overlaySleeping }).catch(() => {});
-      }
-    };
-    const showWindow = (by) => {
-      if (shown || !win || win.isDestroyed()) return;
-      shown = true;
-      try {
-        win.showInactive();
-        if (!win.isVisible()) win.show();
-      } catch {}
-      setMode("active", "shown via " + by);
-      presencePing(); // 桌外在场立即可见：窗口全关也保住观众门控与梦话睡眠态
-      // 位置由窗口管理器决定（Sway 浮动 con 居中）；Wayland 下 setPosition/getBounds 不可信，绝不自作摆放
-    };
-    win.once("ready-to-show", () => showWindow("ready-to-show"));
-    watchdogTimer = setTimeout(() => {
-      if (!shown) {
-        log("error", "show watchdog fired", {});
-        try {
-          if (win && !win.isDestroyed()) win.destroy();
-        } catch {}
-        win = null;
-        setMode("off", "show watchdog");
-      }
-    }, 9000);
-
-    win.webContents.on("did-finish-load", () => {
-      loaded = true;
-      push();
-      log("info", "did-finish-load", {});
-      // 素材预热：完整 109 段经 fish-pet:asset 低速推送（每 120ms 一段 ≈13s 铺满），页内缓存；
-      // 未预热段 roll 未命中时页侧还会按需请求。预热期间逐段校验存活，cleanup 停止。
-      let names = [];
-      try {
-        names = Object.keys(ASSETS);
-      } catch {}
-      names.forEach((name, i) => {
-        const t = setTimeout(() => {
-          if (cleaned || !win || win.isDestroyed()) return;
-          try {
-            win.webContents.send("fish-pet:asset", { name, data: ASSETS[name] });
-          } catch {}
-        }, 1500 + i * 120);
-        prefetchTimers.push(t);
-      });
-      if (!debug) return;
-      // 调试探针（仅 overlayDebug）：视频推进 + 两次窗口自捕获 + 合成 poke 输入链路验证
-      const probeVideo = (tag) => {
-        if (!win || win.isDestroyed()) return;
-        const code =
-          '(function(){var v=document.querySelector(".fish-video.fish-front")||document.querySelector("video");' +
-          "if(!v)return JSON.stringify({video:false});" +
-          'return JSON.stringify({clip:window.__fishClip||null,pokes:window.__fishPokes||0,currentTime:v.currentTime,paused:v.paused,readyState:v.readyState,videoWidth:v.videoWidth,videoHeight:v.videoHeight});})()';
-        win.webContents
-          .executeJavaScript(code)
-          .then((out) => log("info", "video probe " + tag, { probe: JSON.parse(out) }))
-          .catch((cause) => log("warn", "video probe " + tag + " failed", { error: String(cause) }));
-      };
-      const capture = (tag) => {
-        if (!win || win.isDestroyed()) return;
-        win.webContents
-          .capturePage()
-          .then((image) => {
-            try {
-              require("node:fs").mkdirSync(evidenceDir, { recursive: true });
-              require("node:fs").writeFileSync(evidenceDir + "/capture-" + tag + ".png", image.toPNG());
-              log("info", "capturePage " + tag, { bytes: image.toPNG().length });
-            } catch {}
-          })
-          .catch((cause) => log("warn", "capturePage " + tag + " failed", { error: String(cause) }));
-      };
-      const pokeTest = () => {
-        if (!win || win.isDestroyed()) return;
-        try {
-          win.webContents.sendInputEvent({ type: "mouseDown", x: 180, y: 180, button: "left", clickCount: 1 });
-          win.webContents.sendInputEvent({ type: "mouseUp", x: 180, y: 180, button: "left", clickCount: 1 });
-          setTimeout(() => probeVideo("after-poke"), 600);
-        } catch (cause) {
-          log("warn", "sendInputEvent failed", { error: String(cause) });
-        }
-      };
-      setTimeout(() => probeVideo("1"), 900);
-      setTimeout(() => capture("1"), 1500);
-      setTimeout(() => pokeTest(), 2600);
-      setTimeout(() => {
-        // 合成一次性通道：碎碎念气泡+cue 片、工作档位——验证页内状态应用链路
-        murmurNow = { text: "(debug) 碎碎念链路自检", cue: POOLS.whisper[0], at: Date.now() };
-        push();
-        setTimeout(() => capture("2-murmur"), 1600);
-        setTimeout(() => {
-          murmurNow = null;
-          const savedTier = st ? st.tier : null;
-          st = Object.assign({}, st, { tier: "working", tool: "debug" });
-          push();
-          setTimeout(() => {
-            capture("3-working");
-            st = Object.assign({}, st, { tier: savedTier, tool: savedTier === "working" ? (st && st.tool) : null });
-            push();
-            setTimeout(() => capture("4-restored"), 1800);
-          }, 2200);
-        }, 2400);
-      }, 4200);
-      // 语言链路自检：页内直接 fishIpc.send("lang","zh")（与菜单点击同一 IPC 路径），
-      // 等 server 权威经 state 回流后打开菜单验证 zh 标签，再补一条手动碎碎念观察中文输出
-      setTimeout(() => {
-        if (!win || win.isDestroyed()) return;
-        try {
-          void win.webContents.executeJavaScript("try{fishIpc.send('lang','zh')}catch(e){}").catch(() => {});
-        } catch {}
-        setTimeout(() => {
-          if (!win || win.isDestroyed()) return;
-          win.webContents
-            .executeJavaScript(
-              'var h=document.querySelector(".fish-hit");h.dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,cancelable:true,clientX:60,clientY:60}));' +
-                'var m=document.querySelector(".fish-menu");JSON.stringify({menuOpen:!!m,labels:m?[].map.call(m.querySelectorAll("button"),function(b){return b.textContent}):[]})',
-            )
-            .then((out) => {
-              log("info", "lang probe", JSON.parse(out));
-              return capture("5-lang-zh");
-            })
-            .then(() => {
-              // 收菜单 + 触发一条真实手动碎碎念（zh prompt → 模型输出中文与否由模型决定）
-              try {
-                void win.webContents
-                  .executeJavaScript(
-                    'document.body.dispatchEvent(new MouseEvent("pointerdown",{bubbles:true}));try{fishIpc.send("murmur")}catch(e){}',
-                  )
-                  .catch(() => {});
-              } catch {}
-            })
-            .catch((cause) => log("warn", "lang probe failed", { error: String(cause) }));
-        }, 2500);
-      }, 9500);
-      // ---- 对齐链路自检（仅 overlayDebug）：睡觉 presence、murmurGate 真实翻转、prompt 路由、
-      // 随机动作素材、菜单滚动能力。全部走与用户点击同一 IPC 路径，合成字符串，无真实模型请求。----
-      const menuLabels = () =>
-        win.webContents
-          .executeJavaScript(
-            'var h=document.querySelector(".fish-hit");h.dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,cancelable:true,clientX:60,clientY:60}));' +
-              'var m=document.querySelector(".fish-menu");JSON.stringify({labels:m?[].map.call(m.querySelectorAll("button"),function(b){return b.textContent}):[],' +
-              'scroll:m?{sh:m.scrollHeight,ch:m.clientHeight}:null})',
-          )
-          .then((out) => JSON.parse(out));
-      const send = (code) => {
-        try {
-          void win.webContents.executeJavaScript(code).catch(() => {});
-        } catch {}
-      };
-      setTimeout(() => {
-        if (!win || win.isDestroyed()) return;
-        // 1) 睡觉：sleep cmd → provider sleeping + presence 立即拍
-        send('try{fishIpc.send("sleep",true)}catch(e){}');
-        setTimeout(async () => {
-          if (!win || win.isDestroyed()) return;
-          try {
-            const snap = await provided.impl.mode();
-            log("info", "sleep probe", { sleeping: snap.sleeping });
-          } catch {}
-          send('try{fishIpc.send("sleep",false)}catch(e){}');
-        }, 1800);
-      }, 12000);
-      setTimeout(() => {
-        if (!win || win.isDestroyed()) return;
-        // 2) murmurGate：读当前标签 → 发真实 next → 等 state 回流 → 复读标签确认翻转
-        menuLabels()
-          .then((m1) => {
-            const offShown = (m1.labels || []).some((x) => x === "关碎碎念" || x === "Turn muttering off");
-            log("info", "gate probe before", { offShown });
-            send('try{fishIpc.send("murmurGate",' + (offShown ? "false" : "true") + ")}catch(e){}");
-          })
-          .catch(() => {});
-        setTimeout(() => {
-          if (!win || win.isDestroyed()) return;
-          win.webContents
-            .executeJavaScript("JSON.stringify({whisper:window.__fishWhisper,clip:window.__fishClip||null})")
-            .then((out) => {
-              const parsed = JSON.parse(out);
-              return menuLabels().then((m2) => {
-                const offShown2 = (m2.labels || []).some((x) => x === "关碎碎念" || x === "Turn muttering off");
-                log("info", "gate probe after", { offShown: offShown2, pageWhisper: parsed.whisper, scroll: m2.scroll });
-              });
-            })
-            .catch(() => {});
-        }, 6000);
-      }, 15000);
-      setTimeout(() => {
-        if (!win || win.isDestroyed()) return;
-        // 3) prompt 路由：todoAdd cmd → main 定向窗口开宿主 dialog（真实窗口会出现，用户可 Esc 取消）
-        send('try{fishIpc.send("todoAdd")}catch(e){}');
-        setTimeout(() => {
-          if (!win || win.isDestroyed()) return;
-          // 4) 随机动作：预热已铺满（≈13s），点菜单换个动作应能直接播分类素材
-          send(
-            'var h=document.querySelector(".fish-hit");h.dispatchEvent(new MouseEvent("contextmenu",{bubbles:true,cancelable:true,clientX:60,clientY:60}));' +
-              'var m=document.querySelector(".fish-menu");[].forEach.call(m.querySelectorAll("button"),function(b){if(b.textContent==="换个动作"||b.textContent==="Another move")b.click()});',
-          );
-          setTimeout(() => {
-            if (!win || win.isDestroyed()) return;
-            win.webContents
-              .executeJavaScript("JSON.stringify({clip:window.__fishClip||null})")
-              .then((out) => log("info", "random move probe", JSON.parse(out)))
-              .catch(() => {});
-          }, 1500);
-        }, 1200);
-      }, 18000);
-    });
-    // WM/程序关闭（非 cleanup 自身 destroy）：回退窗口内鱼；cleanup 路径 cleaned=true 不重复 mode/事件
-    win.on("closed", () => {
-      log("info", "overlay window closed", {});
-      stopMotion(); // WM 手关时飞行必停
-      if (cleaned) return;
-      if (mode === "dismissed") return; // 用户主动退出：closed 是 destroy 的正常路径，不回退 off
-      setMode("off", "window closed");
-    });
-    // 渲染进程崩溃：销毁坏窗（触发上面的 closed → 回退窗口鱼）；不自动重建，避免无限重启面
-    win.webContents.on("render-process-gone", (_event, details) => {
-      log("error", "render-process-gone", { reason: details?.reason, exitCode: details?.exitCode });
-      stopMotion();
-      if (cleaned) return;
-      try {
-        if (win && !win.isDestroyed()) win.destroy();
-      } catch {}
-    });
-
-    try {
-      await win.loadFile(require("node:path").join(overlayDir, "index.html"));
-    } catch (cause) {
-      log("error", "loadFile rejected", { error: String(cause) });
-      try {
-        if (win && !win.isDestroyed()) win.destroy();
-      } catch {}
-      win = null;
-      setMode("off", "load failed");
-      return;
-    }
-
-    // ---------- 页 → main 命令（开聊/手动碎碎念/手动余额）：只认本窗口 sender ----------
-    // ---------- win32 惯性拖动引擎（main 全程 DIP：screen 光标锚 + setPosition，renderer 零位移 IPC） ----------
-    // 参数与窗口版 throwFish 同源：g=1600、侧/地 rest=0.72、顶=0.5、dt≤0.05、落地 |vy|>240 才反弹、
-    // 地面逐帧 vx*=0.86、|vx|<24 停、释放 |vx|<90 且 |vy|<90 不飞。物理内部浮点，setPosition 时 round。
-    const sendMotion = (kind) => {
-      try {
-        if (win && !win.isDestroyed()) win.webContents.send("fish-pet:motion", { kind });
-      } catch {}
-    };
-    const stageGeom = () => {
-      // 与页 setSize 同式的镜像：舞台宽来自 server state width（120..320），窗口内水平居中、距窗底 10px
-      const c = Math.max(120, Math.min(320, Math.round(st && typeof st.width === "number" ? st.width : 200)));
-      return { c, sh: Math.round((c * 9) / 16) };
-    };
-
-    // ---------- 真实显示矩形并集几何：外接大矩形包含无显示 void，不再作为可落/可飞区域 ----------
-    // 不变量：鱼身（stage）与真实并集外缘保持 8px 余量 ⟺ dilate(stage, 8) ⊆ raw display 并集。
-    // 用原始 bounds 判覆盖（不逐屏内缩——那会在相邻屏间造 16px 假 void 把接缝变墙）；
-    // 相邻屏共享覆盖范围内跨屏自由，只有真实并集暴露的边缘碰撞；负 origin/混排/scale 天然支持。
-    const DISPLAY_MARGIN = 8; // 鱼身与暴露边缘的余量（窗口版同值）
-    const displayRects = () => {
-      try {
-        return electron.screen.getAllDisplays().map((d) => ({
-          l: d.bounds.x,
-          t: d.bounds.y,
-          r: d.bounds.x + d.bounds.width,
-          b: d.bounds.y + d.bounds.height,
-        }));
-      } catch {
-        return [];
-      }
-    };
-    const stageAt = (x, y, ww, wh, c, sh) => ({
-      l: x + (ww - c) / 2,
-      r: x + (ww - c) / 2 + c,
-      t: y + wh - 10 - sh,
-      b: y + wh - 10,
-    });
-    const stageFits = (x, y, ww, wh, c, sh, rects) => {
-      const s = stageAt(x, y, ww, wh, c, sh);
-      return coveredByRaw({ l: s.l - DISPLAY_MARGIN, t: s.t - DISPLAY_MARGIN, r: s.r + DISPLAY_MARGIN, b: s.b + DISPLAY_MARGIN }, rects);
-    };
-    // 精确覆盖判定：目标矩形边与相交 display 边切成 elementary cells，逐 cell 中点被任一 display 覆盖
-    // 即整块覆盖（display 边全是断点，cell 内无边界穿越，中点代表性成立）。双屏开销极小。
-    const coveredByRaw = (s, rects) => {
-      if (!rects.length) return false;
-      const xs = [s.l, s.r];
-      const ys = [s.t, s.b];
-      for (const r of rects) {
-        if (r.r <= s.l || r.l >= s.r || r.b <= s.t || r.t >= s.b) continue; // 不相交不切
-        xs.push(Math.max(r.l, s.l), Math.min(r.r, s.r));
-        ys.push(Math.max(r.t, s.t), Math.min(r.b, s.b));
-      }
-      xs.sort((a, b) => a - b);
-      ys.sort((a, b) => a - b);
-      for (let i = 0; i + 1 < xs.length; i++) {
-        if (xs[i + 1] - xs[i] < 1e-9) continue;
-        for (let j = 0; j + 1 < ys.length; j++) {
-          if (ys[j + 1] - ys[j] < 1e-9) continue;
-          const cx = (xs[i] + xs[i + 1]) / 2;
-          const cy = (ys[j] + ys[j + 1]) / 2;
-          if (!rects.some((r) => r.l <= cx && cx <= r.r && r.t <= cy && cy <= r.b)) return false;
-        }
-      }
-      return true;
-    };
-    // stage 已落 void（拔屏/改分辨率）：把 dilate(stage) 投影到最近的能容纳它的 display 内（距离最小）
-    const projectStage = (x, y, ww, wh, c, sh, rects) => {
-      const s = stageAt(x, y, ww, wh, c, sh);
-      const q = { l: s.l - DISPLAY_MARGIN, t: s.t - DISPLAY_MARGIN, r: s.r + DISPLAY_MARGIN, b: s.b + DISPLAY_MARGIN };
-      const w = q.r - q.l;
-      const h = q.b - q.t;
-      let best = null;
-      let bestD = Infinity;
-      for (const r of rects) {
-        if (r.r - r.l < w || r.b - r.t < h) continue; // 该 display 装不下
-        const l = clamp(q.l, r.l, r.r - w);
-        const t = clamp(q.t, r.t, r.b - h);
-        const d = (l - q.l) * (l - q.l) + (t - q.t) * (t - q.t);
-        if (d < bestD) {
-          bestD = d;
-          best = { x: l + DISPLAY_MARGIN - (ww - c) / 2, y: t + DISPLAY_MARGIN - (wh - 10 - sh) };
-        }
-      }
-      return best;
-    };
-    // 无效轴贴边：在 [from, to]（from 有效、to 无效，≤12px 亚步内，方向无关）二分最大有效点，鱼吻真实边界
-    const clampAxis = (from, to, fits) => {
-      let lo = from;
-      let hi = to;
-      while (Math.abs(hi - lo) > 0.25) {
-        const mid = (lo + hi) / 2;
-        if (fits(mid)) lo = mid;
-        else hi = mid;
-      }
-      return lo;
-    };
-    // 拖动不把 stage 带进 void：只放行被覆盖的候选位（从 void 只能拖回有效区，不能更深入）
-    const dragTick = () => {
-      if (!win || win.isDestroyed() || !motion || motion.phase !== "drag") {
-        sendMotion("land"); // 异常态收摊：让页面回 state（win 已毁时 sendMotion 自身守卫为 no-op）
-        return stopMotion();
-      }
-      try {
-        const c = electron.screen.getCursorScreenPoint();
-        const rects = displayRects();
-        let ww = 360;
-        let wh = 240;
-        try {
-          const sz = win.getSize();
-          ww = sz[0];
-          wh = sz[1];
-        } catch {}
-        const { c: sc, sh } = stageGeom();
-        const x = Math.round(c.x - motion.grabX);
-        const y = Math.round(c.y - motion.grabY);
-        if (rects.length && stageFits(x, y, ww, wh, sc, sh, rects) && (x !== motion.lastSetX || y !== motion.lastSetY)) {
-          motion.lastSetX = x;
-          motion.lastSetY = y;
-          win.setPosition(x, y);
-        }
-        motion.samples.push({ t: Date.now(), x: c.x, y: c.y });
-        if (motion.samples.length > 6) motion.samples.shift();
-      } catch {
-        sendMotion("land");
-        stopMotion();
-      }
-    };
-    const throwTick = () => {
-      if (!win || win.isDestroyed() || !motion || motion.phase !== "throw") {
-        sendMotion("land"); // 异常态收摊：让页面回 state（win 已毁时为 no-op）
-        return stopMotion();
-      }
-      const now = Date.now();
-      const dt = Math.min(0.05, (now - motion.last) / 1000); // 窗口版同 clamp：防后台巨步
-      motion.last = now;
-      const rects = displayRects();
-      if (!rects.length) {
-        sendMotion("land"); // 空显示器列表：停且通知，页面不留 drag 片
-        return stopMotion();
-      }
-      let ww = 360;
-      let wh = 240;
-      try {
-        const s = win.getSize();
-        ww = s[0];
-        wh = s[1];
-      } catch {} // getSize 失败用窗口标称尺寸兜底
-      const { c: sc, sh } = stageGeom();
-      const fits = (x, y) => stageFits(x, y, ww, wh, sc, sh, rects);
-      // 拔屏/改分辨率后当前位置已落 void：投影到最近有效位并安全落地，绝不停留在 void
-      if (!fits(motion.x, motion.y)) {
-        const proj = projectStage(motion.x, motion.y, ww, wh, sc, sh, rects);
-        if (proj) {
-          motion.x = proj.x;
-          motion.y = proj.y;
-          try {
-            const rx = Math.round(motion.x);
-            const ry = Math.round(motion.y);
-            if (rx !== motion.lastSetX || ry !== motion.lastSetY) {
-              motion.lastSetX = rx;
-              motion.lastSetY = ry;
-              win.setPosition(rx, ry);
-            }
-          } catch {}
-        }
-        sendMotion("land");
-        return stopMotion();
-      }
-      // substeps 防高速隧穿：每步位移 ≤12px，封顶 40 步防病理开销；dt/g/rest 参数不变
-      const frameD = Math.max(Math.abs(motion.vx * dt), Math.abs(motion.vy * dt) + 800 * dt * dt);
-      const steps = Math.max(1, Math.min(40, Math.ceil(frameD / 12)));
-      const sdt = dt / steps;
-      let landed = false;
-      for (let i = 0; i < steps && !landed; i++) {
-        motion.vy += 1600 * sdt; // g
-        const nx = motion.x + motion.vx * sdt;
-        const ny = motion.y + motion.vy * sdt;
-        if (fits(nx, ny)) {
-          motion.x = nx;
-          motion.y = ny;
-          continue;
-        }
-        const hOK = fits(nx, motion.y);
-        const vOK = fits(motion.x, ny);
-        if (hOK && vOK) {
-          // 双单轴有效但对角无效（并集非凸角）：撤销两轴，各按对应墙反弹
-          motion.vx = -Math.sign(motion.vx) * Math.abs(motion.vx) * 0.72;
-          if (motion.vy > 0) {
-            if (Math.abs(motion.vy) > 240) motion.vy = -Math.abs(motion.vy) * 0.72;
-            else {
-              motion.vy = 0;
-              motion.vx *= 0.86;
-              if (Math.abs(motion.vx) < 24) landed = true;
-            }
-          } else {
-            motion.vy = Math.abs(motion.vy) * 0.72 * 0.5;
-          }
-          continue;
-        }
-        if (hOK) motion.x = nx;
-        else {
-          // 侧墙/void：贴边 + 水平反弹（窗口版 rest 同值）
-          motion.x = clampAxis(motion.x, nx, (xx) => fits(xx, motion.y));
-          motion.vx = -Math.sign(motion.vx) * Math.abs(motion.vx) * 0.72;
-        }
-        if (fits(motion.x, ny)) motion.y = ny; // 水平贴边后用新 x 复验，避免旧 vOK 把鱼带入凹口 void
-        else if (motion.vy > 0) {
-          // 下边界（地面）：贴地；高速反弹（窗口版 |vy|>240），低速摩擦滑停
-          motion.y = clampAxis(motion.y, ny, (yy) => fits(motion.x, yy));
-          if (Math.abs(motion.vy) > 240) motion.vy = -Math.abs(motion.vy) * 0.72;
-          else {
-            motion.vy = 0;
-            motion.vx *= 0.86; // 地面摩擦（窗口版逐帧同值）
-            if (Math.abs(motion.vx) < 24) landed = true;
-          }
-        } else {
-          // 上边界阻尼（窗口版顶墙同参）
-          motion.y = clampAxis(motion.y, ny, (yy) => fits(motion.x, yy));
-          motion.vy = Math.abs(motion.vy) * 0.72 * 0.5;
-        }
-      }
-      if (landed) {
-        sendMotion("land"); // 落地：通知页 squash/toState
-        return stopMotion();
-      }
-      try {
-        const rx = Math.round(motion.x);
-        const ry = Math.round(motion.y);
-        if (rx !== motion.lastSetX || ry !== motion.lastSetY) {
-          motion.lastSetX = rx;
-          motion.lastSetY = ry;
-          win.setPosition(rx, ry);
-        }
-      } catch {
-        sendMotion("land"); // setPosition 失败：停且通知，页面不留 drag 片
-        stopMotion();
-      }
-    };
-    cmdHandler = (event, data) => {
-      if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
-      const cmd = data && typeof data.cmd === "string" ? data.cmd : "";
-      log("info", "cmd", { cmd });
-      try {
-        if (cmd === "chat") {
-          const focused = ctx.windows.focused?.() ?? ctx.windows.list?.()[0];
-          if (!focused) {
-            chatFailNow = { at: Date.now() };
-            push();
-            return;
-          }
-          try {
-            if (!focused.isVisible()) focused.show();
-          } catch {}
-          provider?.emit("chat", {}, focused.id);
-        } else if (cmd === "murmur") {
-          // 手动碎碎念：桌外睡着时同窗口菜单语义说梦话
-          const rpc = rpcNow();
-          if (rpc) void rpc.whisper({ dream: overlaySleeping }).catch(() => {});
-        } else if (cmd === "lang") {
-          // overlay 语言菜单：白名单校验后转发 server language RPC（权威更新经 state 回流全端）；
-          // RPC 返回的就是最新快照——直接应用，不依赖事件回流时序
-          const l = data && data.value;
-          if (l === "zh" || l === "en" || l === "ja") {
-            const rpc = rpcNow();
-            if (rpc?.language) {
-              void rpc
-                .language({ lang: l })
-                .then(
-                  (s) => {
-                    if (s) syncFromSnapshot(s);
-                    log("info", "language rpc applied", { lang: l, serverLang: s && s.lang });
-                  },
-                  (cause) => log("warn", "language rpc failed", { error: String(cause) }),
-                )
-                .catch(() => {});
-            } else log("warn", "language rpc unavailable", {});
-          } else {
-            log("warn", "lang cmd rejected", { value: String(l) });
-          }
-        } else if (cmd === "sleep") {
-          // 桌外睡眠唯一来源：页菜单翻转 → main 记忆 + 立即 presence + 通知窗口（Contract status）
-          overlaySleeping = data && data.value === true;
-          pushOverlayState();
-          presencePing();
-        } else if (cmd === "asset") {
-          const name = data && typeof data.value === "string" ? data.value : "";
-          if (name && ASSETS[name]) {
-            try {
-              win.webContents.send("fish-pet:asset", { name, data: ASSETS[name] });
-            } catch {}
-          } else log("warn", "asset cmd rejected", {});
-        } else if (cmd === "todoAdd" || cmd === "name") {
-          // 文本录入不在不可聚焦小窗收键盘：定向到聚焦 OpenCode 窗口开宿主 dialog，
-          // 结果经 promptResult Ipc 回 main 调 RPC。无可用窗口给明确失败（不乐观）。
-          const kind = cmd === "todoAdd" ? "todo" : "name";
-          const focused = ctx.windows.focused?.() ?? ctx.windows.list?.()[0];
-          if (!focused) {
-            actionResultNow = { kind: "prompt", ok: false, at: Date.now() };
-            push();
-            log("warn", "prompt no window", { kind });
-            return;
-          }
-          try {
-            if (!focused.isVisible()) focused.show();
-          } catch {}
-          provider?.emit("prompt", { kind }, focused.id);
-          log("info", "prompt routed", { kind, window: focused.id });
-        } else if (cmd === "todoClear") {
-          const rpc = rpcNow();
-          if (rpc?.todoClear) {
-            void rpc
-              .todoClear()
-              .then((s) => {
-                actionResultNow = { kind: "todoClear", ok: !!s, at: Date.now() };
-                if (s) syncFromSnapshot(s);
-                push();
-              })
-              .catch(() => {
-                actionResultNow = { kind: "todoClear", ok: false, at: Date.now() };
-                push();
-              });
-          } else {
-            actionResultNow = { kind: "todoClear", ok: false, at: Date.now() };
-            push();
-          }
-        } else if (cmd === "notify" || cmd === "murmurGate") {
-          // 共享偏好经 server settings 权威写入；actionResult 只反映真实回包
-          const v = data && data.value === true;
-          const field = cmd === "notify" ? "notify" : "whisper";
-          const rpc = rpcNow();
-          if (rpc?.settings) {
-            void rpc
-              .settings({ [field]: v })
-              .then(
-                (s) => {
-                  actionResultNow = { kind: field, ok: !!(s && typeof s[field] === "boolean" && s[field] === v), value: v, at: Date.now() };
-                  if (s) syncFromSnapshot(s);
-                  push();
-                },
-                () => {
-                  actionResultNow = { kind: field, ok: false, value: v, at: Date.now() };
-                  push();
-                },
-              )
-              .catch(() => {});
-          } else {
-            actionResultNow = { kind: field, ok: false, value: v, at: Date.now() };
-            push();
-            log("warn", "settings rpc unavailable", { field });
-          }
-        } else if (cmd === "bigger" || cmd === "smaller") {
-          // 舞台视觉封顶 320（页 setSize 同钳制）：已达上限不再写共享 width——
-          // 不把 340/360 顶上去（窗口端设的更大值保持原样），也绝不因钳制反向缩小
-          const cur = st && typeof st.width === "number" ? st.width : 200;
-          if (cmd === "bigger" && cur >= 320) {
-            log("info", "bigger ignored: overlay stage capped at 320", { cur });
-            return;
-          }
-          const next = clamp(cmd === "bigger" ? Math.min(cur + 20, 320) : cur - 20, 120, 360);
-          const rpc = rpcNow();
-          if (rpc?.settings) {
-            void rpc
-              .settings({ width: next })
-              .then(
-                (s) => {
-                  actionResultNow = { kind: "width", ok: !!(s && s.width === next), at: Date.now() };
-                  if (s) syncFromSnapshot(s);
-                  push();
-                },
-                () => {
-                  actionResultNow = { kind: "width", ok: false, at: Date.now() };
-                  push();
-                },
-              )
-              .catch(() => {});
-          }
-        } else if (cmd === "reset") {
-          const rpc = rpcNow();
-          if (rpc?.resetBrain) {
-            void rpc
-              .resetBrain({})
-              .then((s) => {
-                resetResultNow = { ok: true, at: Date.now() };
-                if (s) syncFromSnapshot(s);
-                push();
-                log("info", "reset ok", {});
-              })
-              .catch(() => {
-                resetResultNow = { ok: false, at: Date.now() };
-                push();
-                log("warn", "reset failed", {});
-              });
-          }
-        } else if (cmd === "quit") {
-          // 用户右键退出宠物（不退 OpenCode）：dismissed + 销毁；窗口鱼不弹回，
-          // plugin reload/应用重开恢复。WM 手关 overlay 仍走 closed → off 回退，与本路径区分。
-          setMode("dismissed", "user quit");
-          stopMotion(); // 飞行中退出：先停帧循环再毁窗
-          try {
-            if (win && !win.isDestroyed()) win.destroy();
-          } catch (cause) {
-            log("warn", "quit destroy failed", { error: String(cause) });
-          }
-        } else if (cmd === "dragStart") {
-          // win32 拖动开始：renderer 只报手势（零位移 IPC）；main 以光标为锚全程 DIP 跟随。
-          // throw 中再按下 = 抢占抓住飞行中的鱼；重复 start 幂等重启。
-          if (process.platform !== "win32" || !win || win.isDestroyed()) return;
-          try {
-            const p = win.getPosition();
-            const c = electron.screen.getCursorScreenPoint();
-            stopMotion();
-            motion = {
-              phase: "drag",
-              timer: 0,
-              grabX: c.x - p[0],
-              grabY: c.y - p[1],
-              lastSetX: p[0],
-              lastSetY: p[1],
-              samples: [{ t: Date.now(), x: c.x, y: c.y }],
-            };
-            motion.timer = setInterval(dragTick, 16);
-          } catch (cause) {
-            log("warn", "dragStart failed", { error: String(cause) });
-          }
-        } else if (cmd === "dragEnd") {
-          // 手势分类归页面：'click'=单击（仅收摊不 land，不打断 poke）；其余=拖动释放（boolean reduced）。
-          // main 不再用自身坐标阈值判 click；非 click 释放无论 motion/样本状态如何都让页面收尾——
-          // mixed DPI 下页面判拖、main 状态缺失时页面仍能等到 land 回 state。
-          if (process.platform !== "win32") return;
-          if (data && data.value === "click") {
-            stopMotion();
-            return;
-          }
-          if (motion && motion.phase === "throw") return; // 飞行中无 capture，防御性忽略
-          if (!motion || motion.phase !== "drag") {
-            sendMotion("land"); // main 侧未启动/已丢状态：页面仍需回 state（win 毁则 no-op）
-            return;
-          }
-          const reduced = !!(data && data.value === true);
-          try {
-            clearInterval(motion.timer);
-          } catch {}
-          motion.timer = 0;
-          // 释放时不能从 void 起飞：当前位置无效（拔屏/改分辨率）→ 投影最近有效位并 land
-          let ww = 360;
-          let wh = 240;
-          try {
-            const sz = win.getSize();
-            ww = sz[0];
-            wh = sz[1];
-          } catch {}
-          const { c: sc, sh } = stageGeom();
-          const rectsNow = displayRects();
-          if (!stageFits(motion.lastSetX, motion.lastSetY, ww, wh, sc, sh, rectsNow)) {
-            const proj = projectStage(motion.lastSetX, motion.lastSetY, ww, wh, sc, sh, rectsNow);
-            if (proj) {
-              try {
-                const rx = Math.round(proj.x);
-                const ry = Math.round(proj.y);
-                if (rx !== motion.lastSetX || ry !== motion.lastSetY) {
-                  motion.lastSetX = rx;
-                  motion.lastSetY = ry;
-                  win.setPosition(rx, ry);
-                }
-              } catch {}
-            }
-            sendMotion("land");
-            stopMotion();
-            return;
-          }
-          const s1 = motion.samples[0];
-          const s2 = motion.samples[motion.samples.length - 1];
-          let vx = 0;
-          let vy = 0;
-          if (s2 && s1 && s2.t > s1.t) {
-            vx = ((s2.x - s1.x) / (s2.t - s1.t)) * 1000;
-            vy = ((s2.y - s1.y) / (s2.t - s1.t)) * 1000;
-          }
-          if (reduced || (Math.abs(vx) < 90 && Math.abs(vy) < 90)) {
-            sendMotion("land"); // 慢释放/样本不足：就地 squash（窗口版 land 同义）
-            stopMotion();
-            return;
-          }
-          try {
-            const p = win.getPosition();
-            motion = {
-              phase: "throw",
-              timer: 0,
-              x: p[0],
-              y: p[1],
-              vx,
-              vy,
-              last: Date.now(),
-              lastSetX: p[0],
-              lastSetY: p[1],
-            };
-            motion.timer = setInterval(throwTick, 16);
-          } catch (cause) {
-            sendMotion("land"); // throw init 失败也收尾：页面不留 drag 片
-            stopMotion();
-            log("warn", "throw init failed", { error: String(cause) });
-          }
-        } else if (cmd === "dragCancel") {
-          // pointercancel/lostcapture：收摊不飞（throw 阶段无 capture，不会到达；防御性忽略）
-          if (process.platform !== "win32" || !motion || motion.phase !== "drag") return;
-          stopMotion();
-        } else if (cmd === "balance") {
-          void runBalance(true);
-        }
-      } catch (cause) {
-        log("warn", "cmd failed", { cmd, error: String(cause) });
-      }
-    };
-    try {
-      electron.ipcMain.on("fish-pet:cmd", cmdHandler);
-    } catch (cause) {
-      log("error", "ipcMain.on failed", { error: String(cause) });
-    }
-
-    // ---------- server 脑接驳（监督式）：state 双通道 + execution 流低速重连 ----------
-    // listener 挂摘在顶层（cleanup 可达）；这里只做时序：先挂 listener、立即心跳一拍、30s 周期兜底。
-    const heartbeat = async () => {
-      if (cleaned || ctx.signal.aborted) return;
-      const client = ctx.client; // 逐次读取：server 重启后这里是新 client
-      try {
-        const r = client && client.rpc ? client.rpc(FishStateDef) : null;
-        if (!r) throw new Error("client unavailable");
-        const s = await r.state({});
-        if (cleaned) return; // in-flight 落地时插件已收摊：不写状态
-        syncFromSnapshot(s);
-        // 每次成功心跳无条件重挂 listener（先摘后挂，共享同一事件流不新建连接）：
-        // 同端口 server 重启可能复用 client 对象且心跳未失败——条件重挂会漏掉静默结束的
-        // listener，事件推送退化为 30s 快照。30s 快照兜底保留。
-        attachStateListener(client);
-      } catch (cause) {
-        log("warn", "state heartbeat failed", { error: String(cause) });
-      }
-    };
-    attachStateListener(ctx.client);
-    void heartbeat(); // 立即一拍：不等 30s 就有首帧快照
-    heartbeatTimer = setInterval(() => {
-      void heartbeat();
-    }, 30000);
-
-    // 鱼会话完成：读 message.list 解析 cue（与窗口版 fishReply 同语义），气泡+点播推给 overlay
-    const fishReply = async () => {
-      if (!fishSid || cleaned) return;
-      try {
-        const res = await ctx.client.message.list({ sessionID: fishSid, order: "desc", limit: 8 });
-        if (cleaned) return;
-        const msg = (res.data ?? []).find((m) => m.type === "assistant");
-        if (!msg) return;
-        if (msg.finish === "error") {
-          murmurNow = { error: true, at: Date.now() };
-          push();
-          return;
-        }
-        const text = textOf(msg).trim();
-        if (!text) return;
-        const cue = text.match(/\[播放[:：]\s*([^\]]+)\]/);
-        const clean = text.replace(/\[播放[:：][^\]]+\]/g, "").trim();
-        const clip = cue && POOLS.cueMap[cue[1].trim()];
-        murmurNow = { text: clean.slice(0, 60), cue: clip || null, at: Date.now() };
-        push();
-        log("info", "murmur push", { cue: clip || null, len: clean.length });
-      } catch {
-        /* 会话没了：server 会自愈重建 */
-      }
-    };
-    // execution 流监督循环：done（server 重启等）或 throw 都低速重连
-    const watchExec = async () => {
-      let backoff = 1000;
-      while (!execStopped && !ctx.signal.aborted && !cleaned) {
-        let lived = false;
-        try {
-          const sub = ctx.client.event.subscribe({
-            types: [
-              "session.execution.started",
-              "session.execution.succeeded",
-              "session.execution.failed",
-              "session.execution.interrupted",
-            ],
-            signal: ctx.signal,
-          });
-          for await (const ev of sub) {
-            lived = true;
-            backoff = 1000; // 收到事件：连接是活的，退避复位
-            const sid = ev.data && ev.data.sessionID;
-            if (!sid || sid !== fishSid) continue;
-            if (ev.type === "session.execution.started") {
-              // 鱼会话执行中（面板聊天或定时/手动碎碎念）：页内 thinking 反馈
-              chatBusy = true;
-              push();
-              try {
-                if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
-              } catch {}
-              busyWatchdogTimer = setTimeout(() => {
-                if (chatBusy && !cleaned) {
-                  chatBusy = false;
-                  push();
-                  log("warn", "chatBusy watchdog fired", {});
-                }
-                busyWatchdogTimer = 0;
-              }, 90000); // 窗口版同量级：丢终态也不卡死
-            } else if (ev.type === "session.execution.succeeded") {
-              chatBusy = false;
-              try {
-                if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
-                busyWatchdogTimer = 0;
-              } catch {}
-              push();
-              void fishReply();
-            } else if (ev.type === "session.execution.failed") {
-              chatBusy = false;
-              try {
-                if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
-                busyWatchdogTimer = 0;
-              } catch {}
-              murmurNow = { error: true, at: Date.now() };
-              push();
-            } else if (ev.type === "session.execution.interrupted") {
-              chatBusy = false;
-              try {
-                if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
-                busyWatchdogTimer = 0;
-              } catch {}
-              push();
-            }
-          }
-          // 流正常结束/重连间隙：清掉卡死 busy 并停表（started/terminal 跨流不悬空）
-          if (!execStopped && !cleaned && chatBusy) {
-            chatBusy = false;
-            try {
-              if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
-              busyWatchdogTimer = 0;
-            } catch {}
-            push();
-            log("info", "chatBusy cleared on stream end", {});
-          }
-          if (!execStopped && !cleaned) log("info", "execution stream ended", {});
-        } catch (cause) {
-          if (!execStopped && !cleaned) log("warn", "execution stream failed", { error: String(cause) });
-          // 流异常断开：同样清掉卡死 busy
-          if (!execStopped && !cleaned && chatBusy) {
-            chatBusy = false;
-            try {
-              if (busyWatchdogTimer) clearTimeout(busyWatchdogTimer);
-              busyWatchdogTimer = 0;
-            } catch {}
-            push();
-            log("info", "chatBusy cleared on stream failure", {});
-          }
-        }
-        if (execStopped || ctx.signal.aborted || cleaned) break;
-        // 低速重连：连接存活过回 1s；空连接逐次倍增封顶 30s，避免反复秒连的风暴
-        const wait = lived ? 1000 : Math.min(backoff, 30000);
-        if (!lived) backoff = Math.min(backoff * 2, 30000);
-        await new Promise((resolve) => {
-          execWaitResolve = resolve;
-          execRetryTimer = setTimeout(resolve, wait);
-        });
-      }
-    };
-    execStopped = false;
-    void watchExec();
-
-    // presence 心跳：桌外在场 + 睡眠态（页 cmd sleep 是睡眠唯一来源）。TTL 10min，30s 一拍足够；
-    // 窗口全关仍保住观众门控与梦话睡眠判定（presence 优先于 Web focus 的 sleeping）。
-    presenceTimer = setInterval(() => {
-      if (!ctx.signal.aborted && !cleaned) presencePing();
-    }, 30000);
-
-    // 余额：定时轮询（聚合逻辑在外层 runBalance；server 30 分钟缓存，窗口侧同款定时无害）
-    balanceTimer = setInterval(() => {
-      if (!ctx.signal.aborted && !cleaned) void runBalance(false);
-    }, 30 * 60 * 1000);
-  })().catch((cause) => {
-    log("error", "overlay boot threw", { error: String((cause && cause.stack) || cause) });
-    setMode("off", "boot threw");
-  });
-
-  return () => cleanup("returned cleanup");
-}
-
 module.exports.default = Plugin.define((() => {
   const { decl, shim } = buildPrefs();
   return {
@@ -1719,6 +279,8 @@ module.exports.default = Plugin.define((() => {
       };
 
       const awakeFishes = () => fishes.filter((w) => !w.f.state.sleeping);
+      // 视觉接管闸门：睡着 / 手势中 / 飞行行走 / 回复保护期，低优先级一律不换片
+      const fishFree = (f) => !!f && !f.state.sleeping && !f.state.dragging && !f.state.busy && !f.state.replyHold;
       const leadFish = () => {
         const pool = awakeFishes().length ? awakeFishes() : fishes;
         return pool.length ? pick(pool).f : undefined;
@@ -1772,6 +334,9 @@ module.exports.default = Plugin.define((() => {
           rollTimer: 0,
           bubbleTimer: 0,
           disarmTimer: 0,
+          replyHold: false, // 真实回复（碎碎念/聊天完成）一次性片播放中：低优先级不抢
+          replyTimer: 0, // ended 丢失兜底（隐藏页/媒体异常时不留永久锁）
+          replyPending: null, // 有界暂存位（拖动中到达 / B 在 A 播放期间到达；聊天优先）
         };
 
         const applyFacing = () => {
@@ -1808,6 +373,7 @@ module.exports.default = Plugin.define((() => {
             videos[state.front].classList.remove("fish-front");
             state.front ^= 1;
             const front = videos[state.front];
+            state.videoEl = front; // 回复兜底体检读取 paused/ended 用（ended 监听同一元素）
             if (!document.hidden) front.play().catch(() => {});
             if (!opts.loop && opts.onEnded) {
               front.addEventListener("ended", () => {
@@ -1846,6 +412,7 @@ module.exports.default = Plugin.define((() => {
         function rollNext() {
           if (shared.dead) return;
           if (state.sleeping) return; // 睡觉：链由 wake() 重排，这里不续
+          if (state.replyHold) return scheduleRoll(4000); // 真实回复播放中：随机动作不抢，短续
           if (state.dragging || state.busy) return scheduleRoll(4000); // 交互中：短续
           if (shared.work || shared.flash) return scheduleRoll(15000); // 工作期：慢续，链不能死
           if (document.hidden || reduced()) return scheduleRoll(30000);
@@ -1991,6 +558,15 @@ module.exports.default = Plugin.define((() => {
         function land() {
           squash();
           state.busy = false;
+          if (state.replyHold) return scheduleRoll(); // 飞行/行走中已开播的回复播完为止：落地不抢，暂存由其 ended 兑现
+          if (state.replyPending) {
+            // 拖动/飞行期间暂存的真实回复：落地即播，优先于回 idle
+            const p = state.replyPending;
+            state.replyPending = null;
+            playReplyOn(api, p.clip, p.text);
+            scheduleRoll();
+            return;
+          }
           if (!state.sleeping && !shared.work && !shared.flash) toIdle();
           scheduleRoll();
         }
@@ -2002,7 +578,9 @@ module.exports.default = Plugin.define((() => {
 
         hit.addEventListener("pointerdown", (e) => {
           if (e.button === 2) return;
-          try { hit.setPointerCapture(e.pointerId); } catch { return; } // capture 失败：状态尚未置位，直接不进手势
+          try { hit.setPointerCapture(e.pointerId); } catch { return; } // capture 失败：状态尚未置位，不进手势，也不打断正在播的回复
+          clearReplyHold(api); // 用户手势优先：解除回复保护并清空暂存（回复正文仍在 Fish 面板里）
+          state.replyPending = null;
           state.dragging = true;
           state.gen++;
           cancelAnimationFrame(state.raf);
@@ -2079,7 +657,12 @@ module.exports.default = Plugin.define((() => {
               disarm();
               inner.style.transform = ""; // 瞄准偏移还原（与正常 armed 释放同款）
             }
-            if (!state.sleeping && !shared.work && !shared.flash) toIdle();
+            if (state.replyPending) {
+              // 手势期间到达的真实回复：取消路径同样兑现，避免暂存悬挂到下一次交互
+              const p = state.replyPending;
+              state.replyPending = null;
+              playReplyOn(api, p.clip, p.text);
+            } else if (!state.sleeping && !shared.work && !shared.flash) toIdle();
             scheduleRoll();
           };
           hit.addEventListener("pointermove", move);
@@ -2100,12 +683,22 @@ module.exports.default = Plugin.define((() => {
           squash();
           playClickSound();
           if (state.sleeping) return;
+          if (state.replyPending) {
+            // 拖动/按压窗口内到达的真实回复：优先于点击装饰动画
+            const p = state.replyPending;
+            state.replyPending = null;
+            playReplyOn(api, p.clip, p.text);
+            scheduleRoll();
+            return;
+          }
           playClip(pick(POOLS.clicks), { onEnded: toIdle });
           scheduleRoll();
         }
 
         // ---------- 睡觉 ----------
         function goSleep() {
+          clearReplyHold(api); // 用户操作：解除回复保护并清空暂存
+          state.replyPending = null;
           state.sleeping = true;
           hideBubble();
           playClip(POOLS.sleep[0], { onEnded: () => playClip(POOLS.sleep[1], { loop: true }) });
@@ -2158,6 +751,8 @@ module.exports.default = Plugin.define((() => {
           if (fishes.length > 1) item(T().menu.dismiss, () => removeFish(api));
           item(T().menu.randomMove, () => {
             if (state.sleeping) return;
+            clearReplyHold(api); // 用户显式点播随机动作：真实打断回复片即解除保护
+            state.replyPending = null;
             // 与 rollNext 同规则：noMirror 分类（文字池）朝左时不抽，避免文字被镜像
             const cats = POOLS.categories.filter((c) => !(c.noMirror && state.facing === "left"));
             const names = [...cats.flatMap((c) => c.actions), ...POOLS.clicks, ...POOLS.moves.map((m) => (typeof m === "string" ? m : m.name))];
@@ -2261,7 +856,7 @@ module.exports.default = Plugin.define((() => {
             if (!state.sleeping && !shared.work && !shared.flash) toIdle();
           });
           };
-          // 语言选择页：点选后经 language RPC 写入 server 权威（全端经 state 同步回各窗口/overlay）；
+          // 语言选择页：点选后经 language RPC 写入 server 权威（经 state 同步回各窗口）；
           // 旧 server 无该方法时回退本地 prefs（不持久化，下一次权威 lang 会盖回来）
           const buildLangPage = () => {
             menu.replaceChildren();
@@ -2372,6 +967,7 @@ module.exports.default = Plugin.define((() => {
           state.gen++;
           clearTimeout(state.rollTimer);
           clearTimeout(state.bubbleTimer);
+          clearTimeout(state.replyTimer);
           cancelAnimationFrame(state.raf);
           closeMenu();
           document.removeEventListener("visibilitychange", onVisible);
@@ -2423,9 +1019,6 @@ module.exports.default = Plugin.define((() => {
         clearTimeout(saveTimer);
         saveTimer = later(() => {
           if (shared.dead) return;
-          // overlay 接管（active/pending 窗口鱼已卸）：不把空数组盖掉持久位置，
-          // 否则 20s 周期会把 prefs.positions 写成 []，回退只剩 1 条。正常 off 模式照存。
-          if (!fishes.length && (overlayMode === "active" || overlayMode === "pending")) return;
           try {
             prefs.update((d) => {
               d.positions = fishes.map((f) => ({ x: Math.round(f.f.state.x), y: Math.round(f.f.state.y) }));
@@ -2516,6 +1109,7 @@ module.exports.default = Plugin.define((() => {
             if (now > b.releasing) {
               binds.delete(idx);
               const f = fishes[idx]?.f;
+              if (f && f.state.replyHold) continue; // 回复播放中：不清回复气泡也不抢片
               if (f && !f.state.sleeping && !f.state.dragging && !f.state.busy) {
                 f.hideBubble();
                 f.play(POOLS.names.idle, { loop: true });
@@ -2531,7 +1125,7 @@ module.exports.default = Plugin.define((() => {
           binds.set(i, { sid: target.sessionID, boundAt: now, handoff: now + 1000, tier: null, tierAt: 0, releasing: 0 });
           owned.add(target.sessionID);
           const f = fishes[i].f;
-          if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play(workClip("waiting"), { loop: true }); // 交接播真实 waiting 素材（旧硬编码 "work-waiting" 不在素材库）
+          if (fishFree(f)) f.play(workClip("waiting"), { loop: true }); // 交接播真实 waiting 素材（旧硬编码 "work-waiting" 不在素材库）
         }
         for (const [idx, b] of binds) {
           const f = fishes[idx]?.f;
@@ -2541,7 +1135,7 @@ module.exports.default = Plugin.define((() => {
             if (b.tier !== null && now - b.tierAt < 4000) continue;
             b.tier = tier;
             b.tierAt = now;
-            if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play(workClip(tier), { loop: true });
+            if (fishFree(f)) f.play(workClip(tier), { loop: true });
           }
         }
       }
@@ -2550,13 +1144,14 @@ module.exports.default = Plugin.define((() => {
       const playTierAll = (tier) => {
         for (const w of unboundFishes()) {
           const f = w.f;
-          if (f.state.sleeping || f.state.dragging || f.state.busy) continue;
+          if (!fishFree(f)) continue;
           f.play(workClip(tier), { loop: true });
         }
       };
       const petLifeAll = () => {
         for (const w of unboundFishes()) {
           const f = w.f;
+          if (f.state.replyHold) continue; // 回复播放中：不抢片也不清回复气泡
           f.hideBubble();
           if (!f.state.sleeping && !f.state.dragging && !f.state.busy) f.play(POOLS.names.idle, { loop: true });
         }
@@ -2629,11 +1224,11 @@ module.exports.default = Plugin.define((() => {
         if (Array.isArray(s.sessions)) syncBindings(s.sessions);
         if (s.notice && s.notice.at > lastNoticeAt) {
           lastNoticeAt = s.notice.at;
-          bubbleOn(s.notice.text, 3000);
+          bubbleLow(s.notice.text, 3000);
           // 绑定该会话的鱼自己庆祝/沮丧（不受全局冷却；聚合鱼不重复）
           const entry = [...binds.entries()].find(([, b]) => b.sid === s.notice.sid);
           const fish = entry ? fishes[entry[0]]?.f : undefined;
-          if (fish && !fish.state.sleeping && !fish.state.dragging && !fish.state.busy) {
+          if (fishFree(fish)) {
             fish.play(workClip(s.notice.ok ? "success" : "error"), {});
           }
         }
@@ -2642,7 +1237,7 @@ module.exports.default = Plugin.define((() => {
           shared.work = s.tier;
           if (s.tier) {
             playTierAll(s.tier);
-            bubbleOn(s.tier === "working" && s.tool ? `${T().status[s.tier]} · ${s.tool}` : T().status[s.tier]);
+            bubbleLow(s.tier === "working" && s.tool ? `${T().status[s.tier]} · ${s.tool}` : T().status[s.tier]);
           } else {
             petLifeAll();
           }
@@ -2653,10 +1248,10 @@ module.exports.default = Plugin.define((() => {
           if (s.flash) {
             for (const w of unboundFishes()) {
               const f = w.f;
-              if (f.state.sleeping || f.state.dragging) continue;
+              if (f.state.sleeping || f.state.dragging || f.state.replyHold) continue;
               f.play(workClip(s.flash), {});
             }
-            bubbleOn(T().status[s.flash], 3000);
+            bubbleLow(T().status[s.flash], 3000);
             notifyFlash(s.flash, s.flashSid, s.flashAt);
           }
         }
@@ -2724,14 +1319,94 @@ module.exports.default = Plugin.define((() => {
       // =========================================================
       // 鱼会话：创建/调度在 server；这里只做回复捕获（气泡+点播）与面板流式
       // =========================================================
+      // ---------- 真实回复保护：模型回复的一次性片播完为止，低优先级（随机/tier/flash/庆祝/余额/thinking）不抢 ----------
+      // 用户手势（pointerdown）与睡/醒仍可打断并清空暂存；ended/兜底/缺素材都解锁，不留永久锁。
+      // B 在 A 播放期间不覆盖 A：单一暂存位，直接聊天优先（WHISPER_MARK 前置 user 辨来源），同类保最新。
+      const REPLY_FALLBACK_MS = 12000; // ended 丢失兜底：素材实测 ~10s；到期先体检再决定续排或收口
+      const REPLY_REARM_MAX = 2; // 可见页「还在播但未播完」最多续排 2 次（36s 上界，容纳启动/解码慢）
+      const clearReplyHold = (f) => {
+        f.state.replyHold = false;
+        clearTimeout(f.state.replyTimer);
+        f.state.replyTimer = 0;
+      };
+      const replyRestore = (f) => {
+        // 播完按最新持续态恢复：绑定鱼的自己档位 > 聚合工作档 > 聊天 thinking > idle
+        // （flash/庆祝是一次性，过期不补；接下 thinking 所有权让 setFishBusy(false) 能正常收口）
+        clearReplyHold(f);
+        if (shared.dead || !f || f.state.sleeping || f.state.dragging || f.state.busy) return;
+        const idx = fishes.findIndex((w) => w.f === f);
+        const b = idx >= 0 ? binds.get(idx) : undefined;
+        if (b && b.tier) {
+          f.play(workClip(b.tier), { loop: true });
+          return;
+        }
+        if (shared.work) {
+          f.play(workClip(shared.work), { loop: true });
+          return;
+        }
+        if (fishBusy) {
+          f.play(workClip("thinking"), { loop: true });
+          fishClipOwned = true;
+          busyFish = f;
+          return;
+        }
+        f.play(POOLS.names.idle, { loop: true });
+      };
+      const replyDone = (f) => {
+        const pending = f.state.replyPending;
+        if (pending) {
+          f.state.replyPending = null;
+          playReplyOn(f, pending.clip, pending.text);
+          return;
+        }
+        replyRestore(f);
+      };
+      const replyTick = (f, clip, rearm) => {
+        // ended 丢失兜底体检：隐藏页（播放器被挂起）/ 前片还在播 = 健康，续排不切；
+        // 暂停无进展（canplay 不来/play 失败）或续排超限 = 失效，按完成收口（drain 暂存后恢复），始终有界
+        if (f.state.replyHold && f.state.current === clip) {
+          const v = f.state.videoEl;
+          const healthy = document.hidden || (v && !v.paused && !v.ended);
+          if (healthy && (document.hidden || rearm < REPLY_REARM_MAX)) {
+            f.state.replyTimer = setTimeout(() => replyTick(f, clip, rearm + 1), REPLY_FALLBACK_MS);
+            return;
+          }
+        }
+        replyDone(f);
+      };
+      const playReplyOn = (f, clip, text) => {
+        if (!f) return;
+        clearReplyHold(f); // 竞态安全：先清旧保护再开新片
+        f.bubble(text, 6000); // 梦话（睡着）/缺素材：至少气泡，原行为
+        if (f.state.sleeping) return; // 睡着只弹气泡不加动画（原行为），无锁
+        if (!clip || !ASSETS[clip]) return; // 缺素材不伪造成功动画，无锁
+        f.state.replyHold = true;
+        f.state.replyTimer = setTimeout(() => replyTick(f, clip, 0), REPLY_FALLBACK_MS); // per-fish 单槽，dispose 收口
+        f.play(clip, { onEnded: () => replyDone(f) });
+      };
+      const stashReply = (f, clip, text, isChat) => {
+        // 单槽暂存：待播聊天最高（碎碎念不顶掉聊天）；同类保最新
+        const p = f.state.replyPending;
+        if (p && p.isChat && !isChat) return;
+        f.state.replyPending = { clip, text, isChat };
+      };
+      const bubbleLow = (text, ms) => {
+        // 低优先级状态文本（tier/flash/notice/余额/执行错误）：回复气泡展示中不盖
+        const f = leadFish();
+        if (f?.state.replyHold) return;
+        f?.bubble(text, ms);
+      };
+
       const fishReply = async () => {
         if (!fishSid) return;
         try {
           const res = await ctx.client.message.list({ sessionID: fishSid, order: "desc", limit: 8 });
-          const msg = (res.data ?? []).find((m) => m.type === "assistant");
-          if (!msg) return;
+          const msgs = res.data ?? [];
+          const ai = msgs.findIndex((m) => m.type === "assistant");
+          if (ai < 0) return;
+          const msg = msgs[ai];
           if (msg.finish === "error") {
-            bubbleOn(T().bubbles.replyError, 5000);
+            bubbleLow(T().bubbles.replyError, 5000); // 执行错误：低优先，回复播放中不盖
             for (const view of chatViews) view.refresh?.();
             return;
           }
@@ -2739,11 +1414,22 @@ module.exports.default = Plugin.define((() => {
           if (!text) return;
           const cue = text.match(/\[播放[:：]\s*([^\]]+)\]/);
           const clean = text.replace(/\[播放[:：][^\]]+\]/g, "").trim();
+          // 已有消息标记辨别来源：紧邻前置 user 带 WHISPER_MARK 前缀 = 碎碎念，否则 = 直接聊天
+          const um = msgs.slice(ai + 1).find((m) => m.type === "user");
+          const isChat = !!um && !(um.text ?? "").startsWith(WHISPER_MARK);
           const f = leadFish();
-          if (f) {
-            f.bubble(clean.slice(0, 60) || "……", 6000);
+          if (f && cue && !clean) {
+            // cue-only：模型只点了动作没给正文——不伪造"……"成功回复、不进保护、不占暂存，
+            // 按原点播语义裸放一次（可被抢，ended 回 idle），拖动/飞行/保护期不抢
+            if (POOLS.cueMap[cue[1].trim()] && !f.state.replyHold && !f.state.sleeping && !f.state.dragging && !f.state.busy) {
+              f.play(POOLS.cueMap[cue[1].trim()], { onEnded: () => { if (!f.state.replyHold) f.play(POOLS.names.idle, { loop: true }); } });
+            }
+          } else if (f && clean) {
             const clip = (cue && POOLS.cueMap[cue[1].trim()]) || pick(POOLS.whisper); // 无 cue 也要演一段碎碎念动画
-            if (clip && ASSETS[clip] && !f.state.sleeping) f.play(clip, { onEnded: () => f.play(POOLS.names.idle, { loop: true }) });
+            const text60 = clean.slice(0, 60);
+            if (f.state.dragging) stashReply(f, clip, text60, isChat); // 拖动中延后，落地/点击即播
+            else if (f.state.replyHold) stashReply(f, clip, text60, isChat); // B 勿覆盖 A：待播聊天优先
+            else playReplyOn(f, clip, text60);
           }
           for (const view of chatViews) view.refresh?.();
         } catch {
@@ -2796,7 +1482,7 @@ module.exports.default = Plugin.define((() => {
             streamCtl?.abort();
             setFishBusy(false);
             if (ev.type === "session.execution.succeeded") void fishReply();
-            else if (ev.type === "session.execution.failed") bubbleOn(T().bubbles.replyErrorShort, 4000);
+            else if (ev.type === "session.execution.failed") bubbleLow(T().bubbles.replyErrorShort, 4000);
             // interrupted：主人自己掐断的，静默收口
             for (const view of chatViews) view.refresh?.();
           }
@@ -2830,7 +1516,7 @@ module.exports.default = Plugin.define((() => {
         clearTimeout(busyWatchdog);
         if (on) {
           const f = leadFish();
-          if (f && !f.state.sleeping && !f.state.dragging && !f.state.busy && !shared.work && !shared.flash) {
+          if (fishFree(f) && !shared.work && !shared.flash) {
             f.play(workClip("thinking"), { loop: true });
             fishClipOwned = true;
             busyFish = f;
@@ -2840,7 +1526,7 @@ module.exports.default = Plugin.define((() => {
           fishClipOwned = false;
           const g = busyFish;
           busyFish = null;
-          if (g && !g.state.sleeping && !g.state.dragging && !g.state.busy && !shared.work && !shared.flash) {
+          if (fishFree(g) && !shared.work && !shared.flash) {
             g.play(POOLS.names.idle, { loop: true });
           }
         }
@@ -3070,16 +1756,16 @@ module.exports.default = Plugin.define((() => {
         }
         if (worst < 0) {
           if (!force) return; // 自动模式：未配置/失败静默
-          if (bad === "unauthorized") return bubbleOn(T().bubbles.balanceInvalid, 5000);
-          if (bad) return bubbleOn(T().bubbles.balanceFailed, 5000);
-          return bubbleOn(T().bubbles.balanceNoKey, 3500);
+          if (bad === "unauthorized") return bubbleLow(T().bubbles.balanceInvalid, 5000); // 失败三态：低优先，回复播放中不盖
+          if (bad) return bubbleLow(T().bubbles.balanceFailed, 5000);
+          return bubbleLow(T().bubbles.balanceNoKey, 3500);
         }
         const idx = worst >= 100 ? 5 : Math.floor(worst / 20);
         const label = T().balanceLabels[idx];
         for (const f of fishes) {
-          if (!f.f.state.sleeping) f.f.play(POOLS.balance[idx], { onEnded: () => f.f.play(POOLS.names.idle, { loop: true }) });
+          if (!f.f.state.sleeping && !f.f.state.replyHold) f.f.play(POOLS.balance[idx], { onEnded: () => f.f.play(POOLS.names.idle, { loop: true }) });
         }
-        bubbleOn(T().withLabel(report, label), 5000);
+        bubbleLow(T().withLabel(report, label), 5000);
       }
       every(() => {
         if (!shared.dead) void runBalance(false); // 零配置用户也轮询：server 侧无配置时零上游请求
@@ -3087,48 +1773,28 @@ module.exports.default = Plugin.define((() => {
 
       // =========================================================
       // 对外 API（窗口内 Contract：说/播/读状态；睡着回拒绝台词）
-      // overlay active（窗口鱼隐藏）时 say/play 经 main Ipc 转发到桌外身体，status 如实报 overlay，
-      // 不再对 0 条窗口鱼假报/静默 no-op。
       try {
         if (Contract) {
           const FishApi = Contract.define("fish-pet");
           ctx.provide(FishApi, {
             say: (text) => {
-              if (overlayMode === "active" && overlayApi) {
-                try {
-                  void overlayApi.contract({ kind: "say", text: String(text ?? "").slice(0, 200) });
-                  return;
-                } catch {
-                  /* 转发失败落回本地 */
-                }
-              }
               const f = leadFish();
               if (!f) return;
               if (f.state.sleeping) return f.bubble(pick(T().sleepRefusals), 3000);
+              if (f.state.replyHold) return; // 回复播放中：外部 say 不盖回复气泡
               f.bubble(String(text).slice(0, 60), 5000);
             },
             play: (name) => {
               if (!ASSETS[name]) return false;
-              if (overlayMode === "active" && overlayApi) {
-                // 桌外睡着与窗口内同语义：返回 false，不转发后让桌外静默丢弃却对外报 true
-                if (overlaySleeping) return false;
-                try {
-                  void overlayApi.contract({ kind: "play", name });
-                  return true;
-                } catch {
-                  /* 转发失败落回本地 */
-                }
-              }
               const f = leadFish();
-              if (!f || f.state.sleeping) return false;
+              if (!f || f.state.sleeping || f.state.replyHold) return false; // 回复播放中：contract 点播不抢
               f.play(name, { onEnded: () => f.play(POOLS.names.idle, { loop: true }) });
               return true;
             },
             status: () => ({
               fishCount: fishes.length,
-              // 桌外身体在场：true 时 sleeping 反映 overlay 真实睡眠态（main 缓存），不再假 0 鱙静默
-              overlay: overlayMode === "active",
-              sleeping: overlayMode === "active" ? overlaySleeping : sleepingAll(),
+              overlay: false, // 保持既有 Contract.status 返回形状
+              sleeping: sleepingAll(),
               work: shared.work,
               sessionID: fishSid,
             }),
@@ -3149,100 +1815,11 @@ module.exports.default = Plugin.define((() => {
         fallback = true;
       }
       // 鱼的 root 是 position:fixed：Slot 正常时挂在 slot 容器里逃逸到视口，兜底直接挂 body。
-      const mountFishesRoot = () => {
-        for (const w of fishes) (fallback ? document.body : fishesHost).appendChild(w.f.root);
-      };
-      const mountFromPrefs = () => {
-        if (shared.dead || fishes.length) return;
-        const saved = prefs.value.positions ?? [];
-        const count = clamp(saved.length || 1, 1, 6);
-        for (let i = 0; i < count; i++) addFish(saved[i] ?? null);
-        mountFishesRoot();
-      };
-      const unmountAllFish = () => {
-        for (const w of [...fishes]) removeFish(w.f);
-      };
-
-      // ---------- 桌外 overlay 协调（仅 Desktop；Web 完全走原窗口内路径） ----------
-      // mode：off=窗口内鱼（默认/回退）；pending=overlay 启动中（先别挂鱼）；active=桌外鱼就绪（隐藏窗口鱼）。
-      // Web/旧宿主：ctx.main 不可用或 reject → applyOverlayMode("off") → 行为与旧版一致。
-      let overlayMode = null; // null = 未裁决
-      let overlayApi = null;
-      let overlaySleeping = false; // 桌外身体睡眠态缓存（Contract status/play 用；来源 main 的 Ipc state/事件）
-      const openChatFromOverlay = () => {
-        try {
-          ctx.layout.open?.(`${ctx.id}:chat`, ctx.sessions.current?.());
-        } catch {
-          /* 无 layout（旧宿主）*/
-        }
-      };
-      // 桌外菜单的文本录入路由：定向本窗口开宿主 dialog，结果经 promptResult 回 main。
-      // overlay 小窗 focusable:false 不可收键盘——录入永远发生在真实窗口里。
-      const onOverlayPrompt = async (d) => {
-        const kind = d && typeof d.kind === "string" ? d.kind : "";
-        try {
-          if (kind === "todo") {
-            const text = await ctx.dialogs.prompt({ title: T().todo.title, placeholder: T().todo.placeholder });
-            void overlayApi?.promptResult?.({ kind, ok: !!(text && text.trim()), text: text && text.trim() });
-          } else if (kind === "name") {
-            const n = await ctx.dialogs.prompt({
-              title: T().menu.nameFish,
-              placeholder: lang() === "zh" ? "叫它什么…" : lang() === "ja" ? "なんて呼ぶ？" : "What should we call it?",
-            });
-            void overlayApi?.promptResult?.({ kind, ok: !!(n && n.trim()), text: n && n.trim() });
-          }
-        } catch {
-          /* dialogs 缺席：静默取消，不误报失败 */
-        }
-      };
-      const applyOverlayMode = (mode) => {
-        if (mode !== "off" && mode !== "pending" && mode !== "active" && mode !== "dismissed") mode = "off";
-        if (mode === overlayMode) return;
-        overlayMode = mode;
-        if (mode === "active" || mode === "dismissed") {
-          if (fishes.length) unmountAllFish(); // 桌外鱼接管或用户退出：窗口内鱼隐藏
-        } else if (mode === "off") {
-          mountFromPrefs();
-        }
-        // pending：挂起等待 main 裁决（超时兜底在下方 later）
-        try {
-          void overlayApi?.report?.({ hasFish: fishes.length > 0 });
-        } catch {
-          /* 上报失败不影响挂载 */
-        }
-      };
-      const desktopPlatform = !!(ctx.app && ctx.app.platform === "desktop" && FishOverlayDef && ctx.main);
-      if (desktopPlatform) {
-        try {
-          overlayApi = ctx.main(FishOverlayDef);
-          overlayApi.on?.("active", (d) => {
-            if (d && typeof d.sleeping === "boolean") overlaySleeping = d.sleeping;
-            applyOverlayMode(d && d.mode);
-          });
-          overlayApi.on?.("chat", () => openChatFromOverlay());
-          overlayApi.on?.("prompt", (d) => void onOverlayPrompt(d));
-          const snap = overlayApi.state?.();
-          if (snap && snap.mode) {
-            if (typeof snap.sleeping === "boolean") overlaySleeping = snap.sleeping;
-            applyOverlayMode(snap.mode);
-          }
-          void overlayApi
-            .mode()
-            .then((s) => {
-              if (s && typeof s.sleeping === "boolean") overlaySleeping = s.sleeping;
-              applyOverlayMode(s && s.mode);
-            }, () => applyOverlayMode("off"));
-          // 语言不再由窗口启动时推送（避免多窗口竞争权威）：main 与本窗口都从 server state.lang 同步
-          // pending 超时兜底：main 挂死/老宿主时窗口鱼照常出现；若此后 overlay 才就绪，active 事件会收走
-          later(() => {
-            if (!shared.dead && overlayMode === "pending") mountFromPrefs();
-          }, 6000);
-        } catch {
-          overlayApi = null;
-          applyOverlayMode("off");
-        }
-      } else {
-        applyOverlayMode("off"); // Web：立即挂窗口内鱼
+      const saved = prefs.value.positions ?? [];
+      const count = clamp(saved.length || 1, 1, 6);
+      for (let i = 0; i < count; i++) {
+        const fish = addFish(saved[i] ?? null);
+        (fallback ? document.body : fishesHost).appendChild(fish.f.root);
       }
 
       return () => {
@@ -3256,10 +1833,6 @@ module.exports.default = Plugin.define((() => {
         if (alphaSvg) alphaSvg.remove();
         chatViews.clear();
       };
-    },
-    // Electron 主进程入口（桌面 app 单例；Web 永不运行，窗口侧 ctx.main reject 后走窗口内鱼）
-    main(ctx) {
-      return fishOverlayMain(ctx);
     },
   };
 })());

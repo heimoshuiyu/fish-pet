@@ -1,7 +1,7 @@
 {
   "name": "opencode-fish-pet",
-  "version": "0.9.1",
-  "description": "OpenCode V2 desktop pet fish that follows your coding sessions, in-window and as a native desktop overlay",
+  "version": "0.10.0",
+  "description": "In-window pet fish that follows your coding sessions in OpenCode V2 Desktop and Web",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "author": "heimoshuiyu",

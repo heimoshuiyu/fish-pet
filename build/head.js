@@ -1,6 +1,6 @@
 "use strict";
 // fish-pet —— 窗口内大肥鱼桌宠（port 自 dsh-pet；素材源自 dsh-pet，禁止商用；公开分发须署名 https://github.com/PC2005-cloud/dsh-pet，详见 LICENSE）
-// 形态：GUI 双入口渲染器（窗口内 setup + Electron main 桌外 overlay），无 os 声明（保 Web 兼容）
+// 形态：OpenCode Desktop 与 Web 共用窗口内 GUI setup
 // 资产：109 段 480x270 VP9-alpha WebM 重编码（libvpx 解码保 alpha，CRF 42）；动画池配置见 build/pools.json
 
 const ASSETS = {

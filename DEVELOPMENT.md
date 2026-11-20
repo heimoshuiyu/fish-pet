@@ -2,7 +2,7 @@
 
 ## build/ —— GUI 源码与资产管线
 
-- `logic.js`：GUI 逻辑源（改这里，不要改 cjs）
+- `logic.js`：Desktop 和 Web 共用的窗口内 GUI `setup`（改这里，不要改 cjs；无 Electron `main` 入口）
 - `pools.json`：动画池配置（idle/turn/move 权重、五个分类池、点击/工作/余额/睡觉/碎碎念事件池、cue 映射）——加减动画只改这里
 - `gen-assets.py` + `assets/`：按 pools.json 把全部 webm + 鸭子音效 base64 成 head.js（ASSETS + POOLS 常量）；引用缺文件=构建失败
 - `encode-all.sh`：从 dsh-pet 安装包批量重编码全部素材（480×270 VP9-alpha，保 alpha 配方）到 assets/；首次全量入库时用过
