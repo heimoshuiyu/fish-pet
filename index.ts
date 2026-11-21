@@ -288,7 +288,7 @@ const S10N: Record<FishLang, {
       }
       return `【当下】现在是${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日${WEEKDAYS3[d]?.[0] ?? "星期"} ${String(h).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}，${slot}，${dayKind}${holiday ? "，" + holiday : ""}${envLine}。这只是背景，不必刻意报时，也别句句都提节日或天气——多数时候正常说话就好，真贴切时才顺口带一句。`
     },
-    toolNames: { bash: "跑命令", shell: "跑命令", read: "读文件", edit: "改文件", write: "写文件", grep: "搜代码", glob: "找文件", task: "派任务", todowrite: "记待办", webfetch: "读网页", list: "列目录" },
+    toolNames: { bash: "跑命令", shell: "跑命令", read: "读文件", edit: "改文件", write: "写文件", grep: "搜代码", glob: "找文件", task: "派任务", todowrite: "记待办", webfetch: "读网页", list: "列目录", execute: "执行" },
     toolJoin: "、",
     todoDue: (t, overdue) => (overdue ? `‼️ 逾期：${t}` : `⏰ 待办：${t}`),
   },

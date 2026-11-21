@@ -134,12 +134,19 @@ try {
   /* 旧版本窗口没有 effect：回落内存态，无持久化 */
 }
 
+// ---------- 水平命中/碰撞几何（共用）----------
+// 画布 16:9 不变、垂向不动；鱼身约占画布宽 33%–35%（200px 画布实测 65–70px）。
+// 两侧按 28.5% 内缩 → 有效框 43%：覆盖抽样常规姿态鱼身并留 ~7–9px 容差；.fish-hit 命中区与物理 x 边界同用此比例。
+const HIT_X_PCT = 28.5;
+const HIT_X = HIT_X_PCT / 100;
+const hitXW = (w) => w * (1 - 2 * HIT_X); // 内缩后的有效碰撞宽
+
 const CSS = `
 .fish-root{position:fixed;z-index:30;pointer-events:none;user-select:none}
 .fish-inner{position:relative;width:var(--fish-w,200px);height:calc(var(--fish-w,200px)*9/16);transform-origin:50% 100%}
-.fish-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;opacity:0;transition:opacity .16s ease;filter:url(#fish-alpha-fix)}
+.fish-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;opacity:0;filter:url(#fish-alpha-fix)}
 .fish-video.fish-front{opacity:1}
-.fish-hit{position:absolute;inset:0;pointer-events:auto;cursor:grab;z-index:1;touch-action:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.fish-hit{position:absolute;top:0;bottom:0;left:${HIT_X_PCT}%;right:${HIT_X_PCT}%;pointer-events:auto;cursor:grab;z-index:1;touch-action:none;-webkit-user-select:none;-webkit-touch-callout:none}
 .fish-hit.fish-drag{cursor:grabbing}
 .fish-hit.fish-armed{cursor:crosshair}
 .fish-bubble{position:absolute;left:50%;bottom:100%;transform:translateX(-50%);margin-bottom:10px;padding:6px 12px;border-radius:12px;font-size:13px;line-height:1.4;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .25s ease;color:var(--v2-text-text-base,#e8e8e8);background:color-mix(in srgb,var(--v2-background-bg-layer-02,#2c2c2c) 94%,transparent);box-shadow:0 2px 10px rgb(0 0 0 / .25)}
@@ -164,8 +171,7 @@ const CSS = `
 .fish-chat-composer input:focus{outline:none;border-color:var(--v2-action-bg-base,#3d5a80)}
 .fish-chat-composer button{padding:8px 14px;border:0;border-radius:8px;background:var(--v2-action-bg-base,#3d5a80);color:var(--v2-action-text-base,#fff);cursor:pointer;font:inherit;font-size:13px}
 .fish-chat-empty{align-self:center;margin:auto;color:var(--v2-text-text-muted,#888);font-size:12px}
-@media (prefers-reduced-motion:reduce){.fish-video{transition:none}.fish-row-pending .d{animation:none}}
-:root[data-motion="reduce"] .fish-video{transition:none}
+@media (prefers-reduced-motion:reduce){.fish-row-pending .d{animation:none}}
 :root[data-motion="reduce"] .fish-row-pending .d{animation:none}
 `;
 
@@ -440,6 +446,10 @@ module.exports.default = Plugin.define((() => {
         const videos = [videoA, videoB];
         const stageW = () => inner.offsetWidth || 200;
         const stageH = () => inner.offsetHeight || 112;
+        // 水平边界（x 仍为画布左缘）：碰撞框 = 画布内缩 HIT_X（x+w*HIT_X → x+w*(1-HIT_X)），距窗口左右各 m px
+        // xMax 不低于 xMin（极窄窗口两界合一贴左墙）：行走/抛墙/nudge 同一语义不倒挂，resize 无需单独兜底
+        const xMin = (m) => m - stageW() * HIT_X;
+        const xMax = (m) => Math.max(xMin(m), window.innerWidth - m - stageW() * (1 - HIT_X));
         const state = {
           gen: 0,
           front: 0,
@@ -564,7 +574,7 @@ module.exports.default = Plugin.define((() => {
         function walkStep() {
           const x0 = state.x;
           const dir = Math.random() < 0.5 ? -1 : 1;
-          const x1 = clamp(x0 + dir * (80 + Math.random() * 200), 16, window.innerWidth - stageW() - 16);
+          const x1 = clamp(x0 + dir * (80 + Math.random() * 200), xMin(16), xMax(16));
           if (Math.abs(x1 - x0) < 40) {
             toIdle();
             return scheduleRoll();
@@ -625,12 +635,12 @@ module.exports.default = Plugin.define((() => {
             vy += g * dt;
             x += vx * dt;
             y += vy * dt;
-            if (x < 8) {
-              x = 8;
+            if (x < xMin(8)) {
+              x = xMin(8);
               vx = Math.abs(vx) * rest;
             }
-            if (x > window.innerWidth - stageW() - 8) {
-              x = window.innerWidth - stageW() - 8;
+            if (x > xMax(8)) {
+              x = xMax(8);
               vx = -Math.abs(vx) * rest;
             }
             if (y < 8) {
@@ -638,16 +648,20 @@ module.exports.default = Plugin.define((() => {
               vy = Math.abs(vy) * rest * 0.5;
             }
             // 互撞：撞到别的鱼，自己反弹，对方被推开一段
+            const w = stageW(); // 自宽缓存：帧内不变，中心/反弹方向同用
             for (const other of fishes) {
               if (other.f === api) continue;
               const ox = other.f.state.x;
               const oy = other.f.state.y;
-              const overlapX = Math.abs(x - ox) < (stageW() + other.f.state.stageW()) / 2;
+              const ow = other.f.state.stageW();
+              // 有符号中心差 dx：overlapX 与水平反弹/推开同一几何（两鱼宽度可不同，不再用画布左缘判向）
+              const dx = x + w / 2 - (ox + ow / 2);
+              const overlapX = Math.abs(dx) < (hitXW(w) + hitXW(ow)) / 2;
               const overlapY = Math.abs(y - oy) < (stageH() + 80) / 2;
               if (overlapX && overlapY) {
                 if (Math.abs(vx) > Math.abs(vy)) {
-                  vx = (x < ox ? -1 : 1) * Math.abs(vx) * rest;
-                  other.f.nudge(x < ox ? 14 : -14, 0);
+                  vx = (dx < 0 ? -1 : 1) * Math.abs(vx) * rest;
+                  other.f.nudge(dx < 0 ? 14 : -14, 0);
                 } else {
                   vy = (y < oy ? -0.4 : 1) * Math.abs(vy) * rest;
                   other.f.nudge(0, y < oy ? -10 : 10);
@@ -674,7 +688,7 @@ module.exports.default = Plugin.define((() => {
           state.raf = requestAnimationFrame(step);
         }
         const nudge = (dx, dy) => {
-          setPos(clamp(state.x + dx, 8, window.innerWidth - stageW() - 8), clamp(state.y + dy, 8, window.innerHeight - stageH() - 8));
+          setPos(clamp(state.x + dx, xMin(8), xMax(8)), clamp(state.y + dy, 8, window.innerHeight - stageH() - 8));
         };
         function land() {
           squash();
@@ -1078,7 +1092,7 @@ module.exports.default = Plugin.define((() => {
         const onResize = () => {
           if (state.dragging) return; // 拖拽中不抢：落点自会归位
           setPos(
-            clamp(state.x, 0, Math.max(0, window.innerWidth - stageW())),
+            clamp(state.x, xMin(0), xMax(0)),
             clamp(state.y, 0, Math.max(0, window.innerHeight - stageH())),
           );
         };
