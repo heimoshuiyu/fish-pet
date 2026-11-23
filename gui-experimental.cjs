@@ -332,7 +332,7 @@ const playClickSound = () => {
 };
 
 const buildPrefs = () => {
-  const INITIAL = { width: 200, positions: [], todos: [], sessionID: undefined, notify: false, whisper: true, lang: "en" };
+  const INITIAL = { width: 200, positions: [], todos: [], sessionID: undefined, notify: false, whisper: false, lang: "en" };
   if (!Schema || !Store) return { decl: {}, shim: { ...INITIAL, INITIAL } };
   try {
     const Prefs = Schema.Struct({
@@ -1184,7 +1184,7 @@ module.exports.default = Plugin.define((() => {
       }
 
       // ---------- 共享偏好一次性迁移（本地 → server settings 权威）----------
-      // 只上推与内置默认（whisper:true/notify:false/width:200）不同的本地值：多端并存时避免
+      // 只上推与内置默认（whisper:false/notify:false/width:200）不同的本地值：多端并存时避免
       // 默认值端覆盖已迁移端；两端都有自定义值则后写胜出（无法避免，见 README）。上推成功
       // （返回带 whisper 布尔 = 新 server）才打本地标记；旧 server/失败不打，下次 boot 重试。
       let settingsMigrating = false;
@@ -1192,7 +1192,7 @@ module.exports.default = Plugin.define((() => {
         if (settingsMigrating) return;
         settingsMigrating = true;
         const local = {};
-        if (prefs.value.whisper === false && s.whisper !== false) local.whisper = false;
+        if (prefs.value.whisper === true && s.whisper !== true) local.whisper = true;
         if (!!prefs.value.notify === true && s.notify !== true) local.notify = true;
         if (
           typeof prefs.value.width === "number" &&

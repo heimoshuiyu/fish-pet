@@ -418,13 +418,13 @@ export default {
     // 窗口 focus 心跳携带的 lang 仅作 wire 兼容保留，不再每 10s 覆盖权威值
     const storedLang = (await context.storage.get("lang").catch(() => undefined)) as { lang?: string } | undefined
     let serverLang: FishLang = typeof storedLang?.lang === "string" && storedLang.lang in L10N ? (storedLang.lang as FishLang) : "en"
-    // 共享偏好的 server 权威（窗口/overlay 全端一致）：whisper 默认开、notify 默认关、width 默认 200（合法域 120–360）。
+    // 共享偏好的 server 权威（窗口/overlay 全端一致）：whisper 默认关、notify 默认关、width 默认 200（合法域 120–360）。
     // 唯一写入点是 settings 方法（显式、持久化、经 state 同步）；focus 心跳带的 whisper 只作 wire 兼容，不再覆盖权威。
     const storedSettings = (await context.storage.get("settings").catch(() => undefined)) as
       | { whisper?: unknown; notify?: unknown; width?: unknown }
       | undefined
     const settings = {
-      whisper: storedSettings?.whisper !== false,
+      whisper: storedSettings?.whisper === true,
       notify: storedSettings?.notify === true,
       width:
         typeof storedSettings?.width === "number" && Number.isFinite(storedSettings.width)
