@@ -428,19 +428,26 @@ module.exports.default = Plugin.define((() => {
         root.dataset.fishPet = "1";
         const inner = document.createElement("div");
         inner.className = "fish-inner";
-        const videoA = document.createElement("video");
-        const videoB = document.createElement("video");
+        // 视频不挂进 DOM：KDE Plasma Integration 会把 DOM 里任意 ≥8s 的 video/audio
+        // 当作系统媒体上报（静音也不排除），鱼片都是 10s，会让 KDE Connect 一直收到
+        // Chrome 在播放的状态。createElementNS 绕开该扩展对 document.createElement 的
+        // hook；画面逐帧画到 canvas，动画/切换/ended/镜像仍沿用原来的两路预加载。
+        const videoNS = "http://www.w3.org/1999/xhtml";
+        const videoA = document.createElementNS(videoNS, "video");
+        const videoB = document.createElementNS(videoNS, "video");
         for (const v of [videoA, videoB]) {
-          v.className = "fish-video";
           v.muted = true;
           v.playsInline = true;
           v.preload = "auto";
         }
+        const canvas = document.createElement("canvas");
+        canvas.className = "fish-video fish-front";
+        const paint = canvas.getContext("2d");
         const hit = document.createElement("div");
         hit.className = "fish-hit";
         const bubbleEl = document.createElement("div");
         bubbleEl.className = "fish-bubble";
-        inner.append(videoA, videoB, hit, bubbleEl);
+        inner.append(canvas, hit, bubbleEl);
         root.appendChild(inner);
 
         const videos = [videoA, videoB];
@@ -471,10 +478,8 @@ module.exports.default = Plugin.define((() => {
         };
 
         const applyFacing = () => {
-          // 只翻视频：气泡/命中区不随游向镜像（否则气泡文字左右反）
-          const t = state.facing === "left" ? "scaleX(-1)" : "";
-          videoA.style.transform = t;
-          videoB.style.transform = t;
+          // 只翻画面：气泡/命中区不随游向镜像（否则气泡文字左右反）
+          canvas.style.transform = state.facing === "left" ? "scaleX(-1)" : "";
         };
         const setPos = (x, y) => {
           state.x = x;
@@ -500,8 +505,6 @@ module.exports.default = Plugin.define((() => {
           const swap = () => {
             if (myGen !== state.gen || swapped) return;
             swapped = true;
-            back.classList.add("fish-front");
-            videos[state.front].classList.remove("fish-front");
             state.front ^= 1;
             const front = videos[state.front];
             state.videoEl = front; // 回复兜底体检读取 paused/ended 用（ended 监听同一元素）
@@ -516,6 +519,30 @@ module.exports.default = Plugin.define((() => {
           setTimeout(swap, 900);
         }
         const frontVideo = () => videos[state.front];
+        // 前片解码到新帧才重绘，静止/隐藏页不空转；canvas 只承载像素，不注册媒体会话
+        let drawRaf = 0;
+        let drawnVideo = null;
+        let drawnTime = -1;
+        const drawFrame = () => {
+          if (shared.dead || !root.parentNode) return; // 宿主卸载/旧实例被清掉后停止续帧
+          const v = frontVideo();
+          if (!document.hidden && v && v.readyState >= 2 && v.videoWidth) {
+            if (canvas.width !== v.videoWidth || canvas.height !== v.videoHeight) {
+              canvas.width = v.videoWidth;
+              canvas.height = v.videoHeight;
+              drawnVideo = null;
+            }
+            if (v !== drawnVideo || v.currentTime !== drawnTime) {
+              // 视频帧的透明区不会自动擦除上一帧，先清屏再画，避免残影/拖尾
+              paint?.clearRect(0, 0, canvas.width, canvas.height);
+              paint?.drawImage(v, 0, 0, canvas.width, canvas.height);
+              drawnVideo = v;
+              drawnTime = v.currentTime;
+            }
+          }
+          drawRaf = requestAnimationFrame(drawFrame);
+        };
+        drawRaf = requestAnimationFrame(drawFrame);
         const toIdle = () => playClip(POOLS.names.idle, { loop: true });
 
         const squash = () => {
@@ -1104,6 +1131,7 @@ module.exports.default = Plugin.define((() => {
           clearTimeout(state.bubbleTimer);
           clearTimeout(state.replyTimer);
           cancelAnimationFrame(state.raf);
+          cancelAnimationFrame(drawRaf);
           closeMenu();
           document.removeEventListener("visibilitychange", onVisible);
           window.removeEventListener("resize", onResize);
